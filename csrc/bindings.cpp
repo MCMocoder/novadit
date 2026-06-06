@@ -37,6 +37,9 @@ at::Tensor fused_out_residual_forward(
     const at::Tensor& residual,
     c10::optional<at::Tensor> bias);
 
+at::Tensor fused_geglu_forward(
+    const at::Tensor& z);
+
 at::Tensor fused_gate_act_forward(
     const at::Tensor& x,
     int64_t act_id);
@@ -54,6 +57,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "NovaDiT fused QKV pack forward");
   m.def("fused_out_residual_forward", &fused_out_residual_forward,
         "NovaDiT fused out residual forward");
+  m.def("fused_geglu_forward", &fused_geglu_forward,
+        "NovaDiT fused GeGLU forward (GELU-gated, tanh approx)");
   m.def("fused_gate_act_forward", &fused_gate_act_forward,
-        "NovaDiT fused gate act forward");
+        "NovaDiT fused gate act forward (act_id: 0=SiLU, 1=GELU)");
 }

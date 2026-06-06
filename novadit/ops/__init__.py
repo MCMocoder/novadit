@@ -24,7 +24,7 @@ from .adaln import (
     fused_adaln_backward_dparam,
     fused_adaln_backward_dx,
 )
-from .gate_act import fused_gate_act, gate_act_ref
+from .gate_act import fused_geglu, fused_gate_act, gate_act_ref, geglu_ref
 from .qkv_pack import fused_qkv_linear_pack, fused_qkv_pack, qkv_pack_ref
 from .residual import fused_out_residual, out_residual_ref
 
@@ -36,8 +36,10 @@ __all__ = [
     "fused_adaln_inference",
     "fused_adaln_backward_dparam",
     "fused_adaln_backward_dx",
+    "fused_geglu",
     "fused_gate_act",
     "gate_act_ref",
+    "geglu_ref",
     "fused_out_residual",
     "fused_qkv_linear_pack",
     "fused_qkv_pack",

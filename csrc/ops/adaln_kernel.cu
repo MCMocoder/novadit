@@ -11,6 +11,12 @@
 #include "common/cuda_check.h"
 #include "common/cutlass_config.h"
 
+// FP8 support (requires CUDA 11.8+)
+#if defined(__CUDACC__) && CUDART_VERSION >= 11080
+#define NOVADIT_HAS_FP8 1
+#include <cuda_fp8.h>
+#endif
+
 namespace {
 
 constexpr int kAdalnThreads = 256;
@@ -43,6 +49,36 @@ template <typename scalar_t>
 __device__ __forceinline__ VecType<scalar_t> *as_vec_ptr(scalar_t *ptr) {
   return reinterpret_cast<VecType<scalar_t> *>(ptr);
 }
+
+#ifdef NOVADIT_HAS_FP8
+template <> struct VecWidth<__nv_fp8_e4m3> {
+  static constexpr int kElements = 16;
+};
+
+template <> struct VecWidth<__nv_fp8_e5m2> {
+  static constexpr int kElements = 16;
+};
+
+template <>
+__device__ __forceinline__ float to_float(__nv_fp8_e4m3 value) {
+  return static_cast<float>(value);
+}
+
+template <>
+__device__ __forceinline__ __nv_fp8_e4m3 from_float(float value) {
+  return static_cast<__nv_fp8_e4m3>(value);
+}
+
+template <>
+__device__ __forceinline__ float to_float(__nv_fp8_e5m2 value) {
+  return static_cast<float>(value);
+}
+
+template <>
+__device__ __forceinline__ __nv_fp8_e5m2 from_float(float value) {
+  return static_cast<__nv_fp8_e5m2>(value);
+}
+#endif  // NOVADIT_HAS_FP8
 
 template <typename scalar_t>
 __device__ __forceinline__ void
@@ -961,6 +997,28 @@ void fused_adaln_bf16_ungated_forward_inference(
                                                stream);
 }
 
+#ifdef NOVADIT_HAS_FP8
+void fused_adaln_fp8_e4m3_ungated_forward_inference(
+    __nv_fp8_e4m3 const *x, __nv_fp8_e4m3 const *scale,
+    __nv_fp8_e4m3 const *shift, __nv_fp8_e4m3 *y,
+    int64_t batch_size, int64_t seq_len, int64_t hidden_size,
+    float eps, cudaStream_t stream) {
+  launch_fused_adaln_ungated_forward_inference(x, scale, shift, y, batch_size,
+                                               seq_len, hidden_size, eps,
+                                               stream);
+}
+
+void fused_adaln_fp8_e5m2_ungated_forward_inference(
+    __nv_fp8_e5m2 const *x, __nv_fp8_e5m2 const *scale,
+    __nv_fp8_e5m2 const *shift, __nv_fp8_e5m2 *y,
+    int64_t batch_size, int64_t seq_len, int64_t hidden_size,
+    float eps, cudaStream_t stream) {
+  launch_fused_adaln_ungated_forward_inference(x, scale, shift, y, batch_size,
+                                               seq_len, hidden_size, eps,
+                                               stream);
+}
+#endif  // NOVADIT_HAS_FP8
+
 std::vector<at::Tensor> fused_adaln_forward(const at::Tensor &x,
                                             const at::Tensor &scale,
                                             const at::Tensor &shift,
@@ -1029,7 +1087,7 @@ at::Tensor fused_adaln_forward_inference(const at::Tensor &x,
   check_adaln_inputs(x, scale, shift);
   TORCH_CHECK(x.scalar_type() == at::kFloat || x.scalar_type() == at::kHalf ||
                   x.scalar_type() == at::kBFloat16,
-              "fused_adaln_forward_inference only supports fp32/fp16/bf16 tensors");
+              "fused_adaln_forward_inference only supports fp32/fp16/bf16/fp8 tensors");
 
   at::Tensor x_contig = x.contiguous();
   at::Tensor scale_contig = scale.reshape({x.size(0), x.size(2)}).contiguous();
@@ -1068,6 +1126,32 @@ at::Tensor fused_adaln_forward_inference(const at::Tensor &x,
         batch_size, seq_len, hidden_size, eps_f, stream);
     check_launch(cudaGetLastError(), "fused_adaln_forward_inference<bf16>");
     break;
+#ifdef NOVADIT_HAS_FP8
+  case at::kFloat8_e4m3fn: {
+    using fp8_t = __nv_fp8_e4m3;
+    fused_adaln_fp8_e4m3_ungated_forward_inference(
+        reinterpret_cast<fp8_t const *>(x_contig.data_ptr()),
+        reinterpret_cast<fp8_t const *>(scale_contig.data_ptr()),
+        reinterpret_cast<fp8_t const *>(shift_contig.data_ptr()),
+        reinterpret_cast<fp8_t *>(y.data_ptr()),
+        batch_size, seq_len, hidden_size, eps_f, stream);
+    check_launch(cudaGetLastError(),
+                 "fused_adaln_forward_inference<fp8_e4m3>");
+    break;
+  }
+  case at::kFloat8_e5m2: {
+    using fp8_t = __nv_fp8_e5m2;
+    fused_adaln_fp8_e5m2_ungated_forward_inference(
+        reinterpret_cast<fp8_t const *>(x_contig.data_ptr()),
+        reinterpret_cast<fp8_t const *>(scale_contig.data_ptr()),
+        reinterpret_cast<fp8_t const *>(shift_contig.data_ptr()),
+        reinterpret_cast<fp8_t *>(y.data_ptr()),
+        batch_size, seq_len, hidden_size, eps_f, stream);
+    check_launch(cudaGetLastError(),
+                 "fused_adaln_forward_inference<fp8_e5m2>");
+    break;
+  }
+#endif  // NOVADIT_HAS_FP8
   default:
     TORCH_CHECK(false, "Unsupported dtype for fused_adaln_forward_inference");
   }
