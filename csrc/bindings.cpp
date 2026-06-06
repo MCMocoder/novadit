@@ -8,6 +8,12 @@ std::vector<at::Tensor> fused_adaln_forward(
     const at::Tensor& shift,
     double eps);
 
+at::Tensor fused_adaln_forward_inference(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    const at::Tensor& shift,
+    double eps);
+
 at::Tensor fused_adaln_backward_dx(
     const at::Tensor& dy,
     const at::Tensor& x,
@@ -38,6 +44,8 @@ at::Tensor fused_gate_act_forward(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_adaln_forward", &fused_adaln_forward,
         "NovaDiT fused AdaLN forward");
+  m.def("fused_adaln_forward_inference", &fused_adaln_forward_inference,
+        "NovaDiT fused AdaLN forward (inference-only, returns y without stats)");
   m.def("fused_adaln_backward_dx", &fused_adaln_backward_dx,
         "NovaDiT fused AdaLN backward dx");
   m.def("fused_adaln_backward_dparam", &fused_adaln_backward_dparam,

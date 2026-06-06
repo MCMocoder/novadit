@@ -20,6 +20,7 @@ from novadit.ops import (
     HAS_NOVADIT_CUDA,
     adaln_ref,
     fused_adaln,
+    fused_adaln_inference,
     fused_adaln_backward_dparam,
     fused_adaln_backward_dx,
     novadit_cuda,
@@ -167,6 +168,40 @@ def run_forward_case(
     )
 
 
+@torch.no_grad()
+def run_inference_case(
+    *,
+    dtype: torch.dtype,
+    shape: Shape,
+    warmup: int,
+    iters: int,
+) -> BenchmarkResult:
+    batch_size, _, hidden_size = shape
+    x = torch.randn(shape, device="cuda", dtype=dtype)
+    scale = torch.randn(batch_size, hidden_size, device="cuda", dtype=dtype)
+    shift = torch.randn(batch_size, hidden_size, device="cuda", dtype=dtype)
+
+    def run_ref() -> torch.Tensor:
+        return adaln_ref(x, scale, shift, eps=1e-5)
+
+    def run_fused() -> torch.Tensor:
+        return fused_adaln_inference(x, scale, shift, eps=1e-5)
+
+    ref = run_ref()
+    out = run_fused()
+    rtol, atol = tolerances(dtype)
+    torch.testing.assert_close(out, ref, rtol=rtol, atol=atol)
+
+    return make_result(
+        phase="inference",
+        dtype=dtype,
+        shape=shape,
+        ref_times=cuda_event_benchmark(run_ref, warmup=warmup, iters=iters),
+        fused_times=cuda_event_benchmark(run_fused, warmup=warmup, iters=iters),
+        errors=error_metrics(out, ref, dtype=dtype),
+    )
+
+
 def reference_backward_dx(
     dy: torch.Tensor,
     x: torch.Tensor,
@@ -190,8 +225,8 @@ def reference_backward_dparam(
     invstd: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     xhat = (x.float() - mean.unsqueeze(-1)) * invstd.unsqueeze(-1)
-    dscale = (dy.float() * xhat).sum(dim=1).to(dy.dtype)
-    dshift = dy.float().sum(dim=1).to(dy.dtype)
+    dscale = (dy.float() * xhat).sum(dim=1)
+    dshift = dy.float().sum(dim=1)
     return dscale, dshift
 
 
@@ -502,6 +537,7 @@ def format_report(results: list[BenchmarkResult]) -> str:
     ]
 
     for phase in (
+        "inference",
         "forward",
         "full_chain",
         "backward",
@@ -546,7 +582,7 @@ def main() -> None:
     parser.add_argument("--iters", type=int, default=200)
     parser.add_argument(
         "--mode",
-        choices=["forward", "full_chain", "backward", "all"],
+        choices=["inference", "forward", "full_chain", "backward", "all"],
         default="all",
     )
     parser.add_argument(
@@ -580,6 +616,16 @@ def main() -> None:
     for dtype_name in args.dtypes:
         dtype = parse_dtype(dtype_name)
         for shape in shapes:
+            if args.mode in ("inference", "all"):
+                print(f"Benchmarking inference dtype={dtype_name}, shape={shape} ...")
+                results.append(
+                    run_inference_case(
+                        dtype=dtype,
+                        shape=shape,
+                        warmup=args.warmup,
+                        iters=args.iters,
+                    )
+                )
             if args.mode in ("forward", "all"):
                 print(f"Benchmarking forward dtype={dtype_name}, shape={shape} ...")
                 results.append(

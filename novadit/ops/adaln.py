@@ -80,6 +80,24 @@ def fused_adaln(
     return adaln_ref(x, scale, shift, eps)
 
 
+@torch.no_grad()
+def fused_adaln_inference(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    eps: float = 1e-5,
+) -> torch.Tensor:
+    """Inference-only fused AdaLN forward.
+
+    Returns only the normalized output ``y`` without saving statistics for
+    backward.  This avoids allocating ``mean`` and ``invstd`` buffers and is
+    intended for pure inference / evaluation workloads.
+    """
+    if novadit_cuda is not None and x.is_cuda:
+        return novadit_cuda.fused_adaln_forward_inference(x, scale, shift, eps)
+    return adaln_ref(x, scale, shift, eps)
+
+
 def fused_adaln_backward_dx(
     dy: torch.Tensor,
     x: torch.Tensor,

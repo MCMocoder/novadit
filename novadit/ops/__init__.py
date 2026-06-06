@@ -20,6 +20,7 @@ except Exception as exc:
 from .adaln import (
     adaln_ref,
     fused_adaln,
+    fused_adaln_inference,
     fused_adaln_backward_dparam,
     fused_adaln_backward_dx,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "NOVADIT_CUDA_IMPORT_ERROR",
     "adaln_ref",
     "fused_adaln",
+    "fused_adaln_inference",
     "fused_adaln_backward_dparam",
     "fused_adaln_backward_dx",
     "fused_gate_act",

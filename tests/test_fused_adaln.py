@@ -94,6 +94,63 @@ def test_fused_adaln_forward_matches_reference_on_cuda(
 
 
 @pytest.mark.parametrize(
+    ("dtype", "shape", "rtol", "atol"),
+    [
+        pytest.param("float16", (2, 3, 768), 1e-2, 1e-2, id="fp16-aligned"),
+        pytest.param("bfloat16", (2, 3, 768), 2e-2, 2e-2, id="bf16-aligned"),
+        pytest.param("float32", (2, 3, 768), 1e-4, 1e-4, id="fp32-aligned"),
+        pytest.param("float16", (2, 3, 770), 2e-2, 2e-2, id="fp16-dynamic"),
+        pytest.param("bfloat16", (2, 3, 770), 3e-2, 3e-2, id="bf16-dynamic"),
+        pytest.param("float32", (2, 3, 770), 2e-4, 2e-4, id="fp32-dynamic"),
+    ],
+)
+def test_fused_adaln_inference_matches_reference_on_cuda(
+    dtype: str,
+    shape: tuple[int, int, int],
+    rtol: float,
+    atol: float,
+) -> None:
+    _requires_cuda_extension()
+
+    import torch
+
+    from novadit.ops import adaln_ref, fused_adaln_inference
+
+    torch_dtype = getattr(torch, dtype)
+    batch_size, seq_len, hidden_size = shape
+    device = "cuda"
+
+    x = torch.randn(batch_size, seq_len, hidden_size, device=device, dtype=torch_dtype)
+    scale = torch.randn(batch_size, hidden_size, device=device, dtype=torch_dtype)
+    shift = torch.randn(batch_size, hidden_size, device=device, dtype=torch_dtype)
+
+    ref = adaln_ref(x, scale, shift, eps=1e-5)
+    out = fused_adaln_inference(x, scale, shift, eps=1e-5)
+
+    assert out.shape == x.shape
+    assert out.dtype == x.dtype
+    torch.testing.assert_close(out, ref, rtol=rtol, atol=atol)
+
+
+def test_fused_adaln_inference_matches_fused_adaln_on_cuda() -> None:
+    """Inference path produces identical output to the training forward path."""
+    _requires_cuda_extension()
+
+    import torch
+
+    from novadit.ops import fused_adaln, fused_adaln_inference
+
+    x = torch.randn(2, 4, 768, device="cuda", dtype=torch.float32)
+    scale = torch.randn(2, 768, device="cuda", dtype=torch.float32)
+    shift = torch.randn(2, 768, device="cuda", dtype=torch.float32)
+
+    y_train = fused_adaln(x, scale, shift, eps=1e-5)
+    y_infer = fused_adaln_inference(x, scale, shift, eps=1e-5)
+
+    torch.testing.assert_close(y_infer, y_train)
+
+
+@pytest.mark.parametrize(
     ("dtype", "hidden_size", "rtol", "atol"),
     [
         pytest.param("float16", 768, 2e-2, 2e-2, id="fp16-aligned"),
@@ -193,15 +250,15 @@ def test_fused_adaln_backward_dparam_matches_formula_on_cuda(
         x, scale, shift, 1e-5
     )
     xhat = (x.float() - mean.unsqueeze(-1)) * invstd.unsqueeze(-1)
-    expected_dscale = (dy.float() * xhat).sum(dim=1).to(torch_dtype)
-    expected_dshift = dy.float().sum(dim=1).to(torch_dtype)
+    expected_dscale = (dy.float() * xhat).sum(dim=1)
+    expected_dshift = dy.float().sum(dim=1)
 
     dscale, dshift = fused_adaln_backward_dparam(dy, x, mean, invstd)
 
     assert dscale.shape == (batch_size, hidden_size)
     assert dshift.shape == (batch_size, hidden_size)
-    assert dscale.dtype == torch_dtype
-    assert dshift.dtype == torch_dtype
+    assert dscale.dtype == torch.float32
+    assert dshift.dtype == torch.float32
     torch.testing.assert_close(
         dscale, expected_dscale, rtol=rtol, atol=atol
     )

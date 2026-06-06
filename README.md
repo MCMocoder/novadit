@@ -69,6 +69,11 @@ uv run python benchmarks/bench_fused_adaln.py --mode backward
 误差报告包含 `max_abs`、`RMSE`、`max_rel` 和 relative L2，并对完整
 backward 分别列出 `dx`、`dscale`、`dshift`。
 
+AdaLN dparam kernel 使用 FP32 累加，并且独立
+`fused_adaln_backward_dparam` API 始终返回 FP32 的 `dscale/dshift`。
+进入 PyTorch autograd 后，框架会在归并到 fp16/bf16 叶子参数时自动转换为
+参数 dtype；若优化器需要保留 FP32 梯度，应使用 FP32 modulation 参数。
+
 DiT block/stack 全链路 benchmark 会执行 SDPA、QKV/输出投影、MLP、
 两次 AdaLN，并在训练模式下计算输入、modulation 和所有模型参数梯度：
 
