@@ -1,0 +1,12 @@
+.pytest_cache/
+.ruff_cache/
+.venv/
+.uv-cache/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+*.so
+.vscode/.ropeproject

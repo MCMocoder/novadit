@@ -1,0 +1,127 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Pytest Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "${file}",
+        "-q"
+      ],
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Minimal Train Example",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/minimal_train.py",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "CUDA_LAUNCH_BLOCKING": "1",
+        "TORCH_USE_CUDA_DSA": "1"
+      }
+    },
+    {
+      "name": "Build Extension And Run Example",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/minimal_dit_block.py",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build CUDA extension inplace",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "PyTorch Python: AdaLN Driver",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/debug_adaln.py",
+      "args": [
+        "--mode",
+        "backward",
+        "--dtype",
+        "fp32",
+        "--iters",
+        "1"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build CUDA extension debug inplace",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "CUDA_LAUNCH_BLOCKING": "1"
+      }
+    },
+    {
+      "name": "PyTorch Native C++: AdaLN (CodeLLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/scripts/debug_adaln.py",
+        "--mode",
+        "backward",
+        "--dtype",
+        "fp32",
+        "--iters",
+        "1"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build CUDA extension debug inplace",
+      "sourceLanguages": [
+        "c++"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "CUDA_LAUNCH_BLOCKING": "1"
+      },
+      "initCommands": [
+        "settings set target.inline-breakpoint-strategy always"
+      ]
+    },
+    {
+      "name": "CUDA Kernel: AdaLN (Nsight CUDA-GDB)",
+      "type": "cuda-gdb",
+      "request": "launch",
+      "program": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/scripts/debug_adaln.py",
+        "--mode",
+        "backward",
+        "--dtype",
+        "fp32",
+        "--iters",
+        "1"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build CUDA extension debug inplace",
+      "debuggerPath": "/usr/local/cuda-12.9/bin/cuda-gdb",
+      "breakOnLaunch": true,
+      "onAPIError": "stop",
+      "logFile": "${workspaceFolder}/build/cuda-gdb.log",
+      "environment": [
+        {
+          "name": "PYTHONPATH",
+          "value": "${workspaceFolder}"
+        },
+        {
+          "name": "CUDA_LAUNCH_BLOCKING",
+          "value": "1"
+        }
+      ],
+      "initCommands": [
+        "set breakpoint pending on"
+      ]
+    }
+  ]
+}

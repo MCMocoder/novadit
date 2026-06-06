@@ -1,0 +1,45 @@
+NovaDiT Full-Chain Benchmark Report
+================================================
+Generated at       : 2026-06-06 14:57:56
+PyTorch version    : 2.11.0+cu129
+CUDA version       : 12.9
+GPU                : NVIDIA GeForce RTX 5070 Ti
+Device capability  : (12, 0)
+
+Configuration
+------------------------------------------------
+Shape              : (2, 256, 768)
+Attention heads    : 12
+Depth              : 1
+MLP ratio          : 4
+Warmup / iterations: 20 / 50
+Attention backend  : PyTorch SDPA
+Fused path         : AdaLN forward + backward
+Reference path     : PyTorch AdaLN formula
+
+Forward
+------------------------------------------------------------------------
+dtype          ref_ms   fused_ms   speedup      out_abs     out_l2     grad_abs    grad_l2
+------------------------------------------------------------------------------------------------
+float16        0.4764     0.2819     1.69x   3.9062e-03  3.119e-04   0.0000e+00  0.000e+00
+bfloat16       0.4709     0.2841     1.66x   3.1250e-02  8.168e-04   0.0000e+00  0.000e+00
+float32        0.8195     0.7225     1.13x   9.5367e-07  1.588e-07   0.0000e+00  0.000e+00
+Summary: avg=1.49x, min=1.13x, max=1.69x
+
+Full Chain
+------------------------------------------------------------------------
+dtype          ref_ms   fused_ms   speedup      out_abs     out_l2     grad_abs    grad_l2
+------------------------------------------------------------------------------------------------
+float16        1.8727     1.2836     1.46x   3.9062e-03  3.119e-04   1.2500e-01  5.088e-04
+bfloat16       1.7386     1.0671     1.63x   3.1250e-02  8.168e-04   1.0000e+00  2.800e-03
+float32        2.2408     1.9062     1.18x   9.5367e-07  1.588e-07   8.0109e-05  4.172e-07
+Summary: avg=1.42x, min=1.18x, max=1.63x
+
+Notes
+------------------------------------------------
+Full chain includes DiT forward and gradients for x, all modulation
+inputs, and all Linear/attention/MLP parameters.
+Each timed full-chain iteration rebuilds the autograd graph.
+Latency values are CUDA event medians; allocations are included.
+QKV pack and gate activation stay on PyTorch until their backward
+kernels are implemented; the report does not claim those fusions.

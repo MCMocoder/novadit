@@ -1,0 +1,28 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": [
+    "tests"
+  ],
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}"
+  ],
+  "python.analysis.typeCheckingMode": "basic",
+  "cmake.configureSettings": {
+    "Python3_EXECUTABLE": "${workspaceFolder}/.venv/bin/python",
+    "TORCH_CUDA_ARCH_LIST": "Ampere;Ada;Hopper;Blackwell"
+  },
+  "terminal.integrated.env.linux": {
+    "UV_CACHE_DIR": "${workspaceFolder}/.uv-cache"
+  },
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}/build/clangd",
+    "--query-driver=/usr/bin/g++,/usr/bin/clang++,/usr/local/cuda-12.9/bin/nvcc"
+  ],
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/*.egg-info": true,
+    "**/.git": true
+  }
+}

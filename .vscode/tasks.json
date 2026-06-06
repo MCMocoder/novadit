@@ -1,0 +1,285 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Bootstrap uv venv",
+      "type": "shell",
+      "command": "uv",
+      "args": [
+        "sync",
+        "--extra",
+        "dev"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "UV_CACHE_DIR": "${workspaceFolder}/.uv-cache"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Configure C++ build",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "-S",
+        ".",
+        "-B",
+        "build",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DPython3_EXECUTABLE=${command:python.interpreterPath}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "UV_CACHE_DIR": "${workspaceFolder}/.uv-cache"
+        }
+      },
+      "dependsOn": [
+        "Bootstrap uv venv"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Build C++ objects",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "build",
+        "-j"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": [
+        "Configure C++ build"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Bootstrap CUTLASS",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/bootstrap_cutlass.sh",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "UV_CACHE_DIR": "${workspaceFolder}/.uv-cache"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Install editable package",
+      "type": "shell",
+      "command": "uv",
+      "args": [
+        "sync",
+        "--extra",
+        "dev"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "UV_CACHE_DIR": "${workspaceFolder}/.uv-cache"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build CUDA extension inplace",
+      "type": "shell",
+      "command": "uv",
+      "args": [
+        "run",
+        "python",
+        "setup.py",
+        "build_ext",
+        "--inplace"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "UV_CACHE_DIR": "${workspaceFolder}/.uv-cache"
+        }
+      },
+      "dependsOn": [
+        "Bootstrap CUTLASS",
+        "Configure C++ build"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Build CUDA extension debug inplace",
+      "type": "shell",
+      "command": "uv",
+      "args": [
+        "run",
+        "python",
+        "setup.py",
+        "build_ext",
+        "--inplace",
+        "--force"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "UV_CACHE_DIR": "${workspaceFolder}/.uv-cache",
+          "NOVADIT_DEBUG": "1",
+          "TORCH_CUDA_ARCH_LIST": "native",
+          "MAX_JOBS": "2"
+        }
+      },
+      "dependsOn": [
+        "Bootstrap CUTLASS",
+        "Configure C++ build"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build CUDA extension release inplace",
+      "type": "shell",
+      "command": "uv",
+      "args": [
+        "run",
+        "python",
+        "setup.py",
+        "build_ext",
+        "--inplace",
+        "--force"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "UV_CACHE_DIR": "${workspaceFolder}/.uv-cache",
+          "NOVADIT_DEBUG": "0",
+          "TORCH_CUDA_ARCH_LIST": "native",
+          "MAX_JOBS": "2"
+        }
+      },
+      "dependsOn": [
+        "Bootstrap CUTLASS",
+        "Configure C++ build"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "Create profile output directory",
+      "type": "process",
+      "command": "mkdir",
+      "args": [
+        "-p",
+        "${workspaceFolder}/build/profiles"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Profile AdaLN - Nsight Systems",
+      "type": "process",
+      "command": "/usr/local/cuda-12.9/bin/nsys",
+      "args": [
+        "profile",
+        "--trace=cuda,nvtx,osrt",
+        "--cuda-event-trace=false",
+        "--sample=none",
+        "--cpuctxsw=none",
+        "--force-overwrite=true",
+        "--output=${workspaceFolder}/build/profiles/adaln_nsys",
+        "${workspaceFolder}/.venv/bin/python",
+        "${workspaceFolder}/scripts/debug_adaln.py",
+        "--mode",
+        "all",
+        "--dtype",
+        "fp32",
+        "--iters",
+        "50"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}"
+        }
+      },
+      "dependsOn": [
+        "Build CUDA extension release inplace",
+        "Create profile output directory"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "Report AdaLN - Nsight Systems Stats",
+      "type": "process",
+      "command": "/usr/local/cuda-12.9/bin/nsys",
+      "args": [
+        "stats",
+        "${workspaceFolder}/build/profiles/adaln_nsys.nsys-rep"
+      ],
+      "dependsOn": [
+        "Profile AdaLN - Nsight Systems"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Profile AdaLN Kernel - Nsight Compute",
+      "type": "process",
+      "command": "/usr/local/cuda-12.9/bin/ncu",
+      "args": [
+        "--set",
+        "full",
+        "--target-processes",
+        "all",
+        "--kernel-name-base",
+        "function",
+        "--kernel-name",
+        "regex:fused_adaln",
+        "--launch-count",
+        "1",
+        "--force-overwrite",
+        "--export",
+        "${workspaceFolder}/build/profiles/adaln_ncu",
+        "${workspaceFolder}/.venv/bin/python",
+        "${workspaceFolder}/scripts/debug_adaln.py",
+        "--mode",
+        "forward",
+        "--dtype",
+        "fp32",
+        "--iters",
+        "1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}"
+        }
+      },
+      "dependsOn": [
+        "Build CUDA extension release inplace",
+        "Create profile output directory"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run pytest",
+      "type": "shell",
+      "command": "uv",
+      "args": [
+        "run",
+        "pytest",
+        "tests",
+        "-q"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "UV_CACHE_DIR": "${workspaceFolder}/.uv-cache"
+        }
+      },
+      "problemMatcher": []
+    }
+  ]
+}

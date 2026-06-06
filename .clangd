@@ -1,0 +1,34 @@
+CompileFlags:
+  CompilationDatabase: /home/steven/novadit/build/clangd
+  Compiler: /usr/bin/clang++
+  Remove:
+    - -forward-unknown-to-host-compiler
+    - -ccbin=*
+    - -gencode
+    - arch=compute_*
+    - code=sm_*
+    - -Xcudafe
+    - --diag_suppress=*
+    - -Xcompiler=*
+    - --expt-relaxed-constexpr
+    - --expt-extended-lambda
+    - --use_fast_math
+  Add:
+    - -DNOVADIT_HAS_CUTLASS=1
+    - -DCUTE_USE_PACKED_TUPLE=1
+    - -I/home/steven/novadit/csrc
+    - -I/home/steven/novadit/third_party/cutlass/include
+    - -I/home/steven/novadit/third_party/cutlass/tools/util/include
+
+---
+If:
+  PathMatch:
+    - .*\.cu
+    - .*\.cuh
+CompileFlags:
+  Add:
+    - -xcuda
+    - --cuda-host-only
+    - --cuda-path=/usr/local/cuda-12.9
+    - --cuda-gpu-arch=sm_90
+    - --no-cuda-version-check
