@@ -11,4 +11,5 @@ __pycache__/
 *.so
 .vscode/.ropeproject
 
-cute_dump
+cute_dump/
+third_party/
