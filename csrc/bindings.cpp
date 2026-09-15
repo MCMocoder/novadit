@@ -40,8 +40,46 @@ at::Tensor fused_out_residual_forward(
 at::Tensor fused_geglu_forward(
     const at::Tensor& z);
 
+at::Tensor fused_geglu_backward(
+    const at::Tensor& dy,
+    const at::Tensor& z);
+
 at::Tensor fused_gate_act_forward(
     const at::Tensor& x,
+    int64_t act_id);
+
+at::Tensor fused_gate_act_backward(
+    const at::Tensor& dy,
+    const at::Tensor& x,
+    int64_t act_id);
+
+std::vector<at::Tensor> fused_adarmsnorm_forward(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    const at::Tensor& shift,
+    double eps);
+
+at::Tensor fused_adarmsnorm_forward_inference(
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    const at::Tensor& shift,
+    double eps);
+
+at::Tensor fused_adarmsnorm_backward_dx(
+    const at::Tensor& dy,
+    const at::Tensor& x,
+    const at::Tensor& scale,
+    const at::Tensor& inv_rms);
+
+std::vector<at::Tensor> fused_adarmsnorm_backward_dparam(
+    const at::Tensor& dy,
+    const at::Tensor& x,
+    const at::Tensor& inv_rms);
+
+at::Tensor fused_fc1_bias_act_forward(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    c10::optional<at::Tensor> bias,
     int64_t act_id);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -59,6 +97,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "NovaDiT fused out residual forward");
   m.def("fused_geglu_forward", &fused_geglu_forward,
         "NovaDiT fused GeGLU forward (GELU-gated, tanh approx)");
+  m.def("fused_geglu_backward", &fused_geglu_backward,
+        "NovaDiT fused GeGLU backward");
   m.def("fused_gate_act_forward", &fused_gate_act_forward,
         "NovaDiT fused gate act forward (act_id: 0=SiLU, 1=GELU)");
+  m.def("fused_gate_act_backward", &fused_gate_act_backward,
+        "NovaDiT fused gate act backward (act_id: 0=SiLU, 1=GELU)");
+  m.def("fused_adarmsnorm_forward", &fused_adarmsnorm_forward,
+        "NovaDiT fused AdaRMSNorm forward");
+  m.def("fused_adarmsnorm_forward_inference", &fused_adarmsnorm_forward_inference,
+        "NovaDiT fused AdaRMSNorm forward (inference-only, returns y without inv_rms)");
+  m.def("fused_adarmsnorm_backward_dx", &fused_adarmsnorm_backward_dx,
+        "NovaDiT fused AdaRMSNorm backward dx");
+  m.def("fused_adarmsnorm_backward_dparam", &fused_adarmsnorm_backward_dparam,
+        "NovaDiT fused AdaRMSNorm backward dscale/dshift");
+  m.def("fused_fc1_bias_act_forward", &fused_fc1_bias_act_forward,
+        "NovaDiT fused FC1 + bias + gated activation forward (CUTLASS SM90)");
 }

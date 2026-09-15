@@ -4,10 +4,11 @@
   "python.testing.pytestArgs": [
     "tests"
   ],
-  "python.analysis.extraPaths": [
+  "basedpyright.analysis.extraPaths": [
+    "${workspaceFolder}/third_party/cutlass/python/CuTeDSL",
     "${workspaceFolder}"
   ],
-  "python.analysis.typeCheckingMode": "basic",
+  "basedpyright.analysis.typeCheckingMode": "off",
   "cmake.configureSettings": {
     "Python3_EXECUTABLE": "${workspaceFolder}/.venv/bin/python",
     "TORCH_CUDA_ARCH_LIST": "Ampere;Ada;Hopper;Blackwell"

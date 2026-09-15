@@ -26,9 +26,9 @@ def test_adaln_ref_forward_shape_and_dtype(mod_shape: tuple[int, ...]) -> None:
 
     from novadit.ops import fused_adaln
 
-    x = torch.randn(2, 8, 16, dtype=torch.float32)
-    scale = torch.randn(*mod_shape, dtype=torch.float32)
-    shift = torch.randn(*mod_shape, dtype=torch.float32)
+    x = torch.randn(2, 8, 16, dtype=torch.bfloat16)
+    scale = torch.randn(*mod_shape, dtype=torch.bfloat16)
+    shift = torch.randn(*mod_shape, dtype=torch.bfloat16)
 
     y = fused_adaln(x, scale, shift)
 
@@ -43,9 +43,9 @@ def test_adaln_ref_matches_manual_formula() -> None:
 
     from novadit.ops import adaln_ref, fused_adaln
 
-    x = torch.randn(2, 4, 8, dtype=torch.float32)
-    scale = torch.randn(2, 1, 8, dtype=torch.float32)
-    shift = torch.randn(2, 1, 8, dtype=torch.float32)
+    x = torch.randn(2, 4, 8, dtype=torch.bfloat16)
+    scale = torch.randn(2, 1, 8, dtype=torch.bfloat16)
+    shift = torch.randn(2, 1, 8, dtype=torch.bfloat16)
 
     ref = adaln_ref(x, scale, shift, eps=1e-5)
     out = fused_adaln(x, scale, shift, eps=1e-5)
@@ -58,11 +58,9 @@ def test_adaln_ref_matches_manual_formula() -> None:
     [
         pytest.param("float16", (2, 3, 768), 1e-2, 1e-2, id="fp16-aligned"),
         pytest.param("bfloat16", (2, 3, 768), 2e-2, 2e-2, id="bf16-aligned"),
-        pytest.param("float32", (2, 3, 768), 1e-4, 1e-4, id="fp32-aligned"),
         # H=770 forces the dynamic path, and row 1+ becomes misaligned for fp16/bf16.
         pytest.param("float16", (2, 3, 770), 2e-2, 2e-2, id="fp16-dynamic"),
         pytest.param("bfloat16", (2, 3, 770), 3e-2, 3e-2, id="bf16-dynamic"),
-        pytest.param("float32", (2, 3, 770), 2e-4, 2e-4, id="fp32-dynamic"),
     ],
 )
 def test_fused_adaln_forward_matches_reference_on_cuda(
@@ -98,10 +96,8 @@ def test_fused_adaln_forward_matches_reference_on_cuda(
     [
         pytest.param("float16", (2, 3, 768), 1e-2, 1e-2, id="fp16-aligned"),
         pytest.param("bfloat16", (2, 3, 768), 2e-2, 2e-2, id="bf16-aligned"),
-        pytest.param("float32", (2, 3, 768), 1e-4, 1e-4, id="fp32-aligned"),
         pytest.param("float16", (2, 3, 770), 2e-2, 2e-2, id="fp16-dynamic"),
         pytest.param("bfloat16", (2, 3, 770), 3e-2, 3e-2, id="bf16-dynamic"),
-        pytest.param("float32", (2, 3, 770), 2e-4, 2e-4, id="fp32-dynamic"),
     ],
 )
 def test_fused_adaln_inference_matches_reference_on_cuda(
@@ -140,9 +136,9 @@ def test_fused_adaln_inference_matches_fused_adaln_on_cuda() -> None:
 
     from novadit.ops import fused_adaln, fused_adaln_inference
 
-    x = torch.randn(2, 4, 768, device="cuda", dtype=torch.float32)
-    scale = torch.randn(2, 768, device="cuda", dtype=torch.float32)
-    shift = torch.randn(2, 768, device="cuda", dtype=torch.float32)
+    x = torch.randn(2, 4, 768, device="cuda", dtype=torch.float16)
+    scale = torch.randn(2, 768, device="cuda", dtype=torch.float16)
+    shift = torch.randn(2, 768, device="cuda", dtype=torch.float16)
 
     y_train = fused_adaln(x, scale, shift, eps=1e-5)
     y_infer = fused_adaln_inference(x, scale, shift, eps=1e-5)
@@ -155,10 +151,8 @@ def test_fused_adaln_inference_matches_fused_adaln_on_cuda() -> None:
     [
         pytest.param("float16", 768, 2e-2, 2e-2, id="fp16-aligned"),
         pytest.param("bfloat16", 768, 4e-2, 4e-2, id="bf16-aligned"),
-        pytest.param("float32", 768, 3e-4, 3e-4, id="fp32-aligned"),
         pytest.param("float16", 770, 3e-2, 3e-2, id="fp16-dynamic"),
         pytest.param("bfloat16", 770, 5e-2, 5e-2, id="bf16-dynamic"),
-        pytest.param("float32", 770, 5e-4, 5e-4, id="fp32-dynamic"),
     ],
 )
 def test_fused_adaln_backward_dx_matches_formula_on_cuda(
@@ -217,10 +211,8 @@ def test_fused_adaln_backward_dx_matches_formula_on_cuda(
     [
         pytest.param("float16", 768, 2e-2, 2e-2, id="fp16-aligned"),
         pytest.param("bfloat16", 768, 4e-2, 4e-2, id="bf16-aligned"),
-        pytest.param("float32", 768, 3e-4, 3e-4, id="fp32-aligned"),
         pytest.param("float16", 770, 2e-2, 2e-2, id="fp16-tail"),
         pytest.param("bfloat16", 770, 4e-2, 4e-2, id="bf16-tail"),
-        pytest.param("float32", 770, 3e-4, 3e-4, id="fp32-tail"),
     ],
 )
 def test_fused_adaln_backward_dparam_matches_formula_on_cuda(
@@ -275,9 +267,9 @@ def test_fused_adaln_autograd_dx_matches_reference_on_cuda() -> None:
     from novadit.ops import adaln_ref, fused_adaln
 
     shape = (2, 3, 768)
-    x = torch.randn(shape, device="cuda", dtype=torch.float32, requires_grad=True)
+    x = torch.randn(shape, device="cuda", dtype=torch.float16, requires_grad=True)
     scale = torch.randn(
-        shape[0], shape[2], device="cuda", dtype=torch.float32, requires_grad=True
+        shape[0], shape[2], device="cuda", dtype=torch.float16, requires_grad=True
     )
     shift = torch.randn_like(scale, requires_grad=True)
     dy = torch.randn_like(x)
@@ -289,6 +281,6 @@ def test_fused_adaln_autograd_dx_matches_reference_on_cuda() -> None:
     fused_adaln(x, scale, shift).backward(dy)
     adaln_ref(ref_x, ref_scale, ref_shift).backward(dy)
 
-    torch.testing.assert_close(x.grad, ref_x.grad, rtol=3e-4, atol=3e-4)
-    torch.testing.assert_close(scale.grad, ref_scale.grad, rtol=3e-4, atol=3e-4)
-    torch.testing.assert_close(shift.grad, ref_shift.grad, rtol=3e-4, atol=3e-4)
+    torch.testing.assert_close(x.grad, ref_x.grad, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(scale.grad, ref_scale.grad, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(shift.grad, ref_shift.grad, rtol=2e-2, atol=2e-2)

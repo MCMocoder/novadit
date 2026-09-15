@@ -188,6 +188,8 @@ endif()
 
 set(NOVADIT_CUDA_SOURCES
   csrc/ops/adaln_kernel.cu
+  csrc/ops/adarmsnorm_kernel.cu
+  csrc/ops/fc1_bias_act_kernel.cu
 )
 
 set(NOVADIT_HOST_SOURCES

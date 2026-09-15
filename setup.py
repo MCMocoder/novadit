@@ -69,9 +69,11 @@ def get_extensions_and_cmdclass():
     sources = [
         "csrc/bindings.cpp",
         "csrc/ops/adaln_kernel.cu",
+        "csrc/ops/adarmsnorm_kernel.cu",
         "csrc/ops/qkv_pack_kernel.cu",
         "csrc/ops/residual_kernel.cu",
         "csrc/ops/gate_act_kernel.cu",
+        "csrc/ops/fc1_bias_act_kernel.cu",
     ]
 
     extension = CUDAExtension(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from novadit.ops import fused_gate_act, gate_act_ref
+from novadit.ops import fused_gate_act, fused_fc1_bias_act, gate_act_ref
 
 
 class NovaDiTMLP(nn.Module):
@@ -15,6 +15,7 @@ class NovaDiTMLP(nn.Module):
         bias: bool = True,
         dropout_p: float = 0.0,
         use_fused_gate_act: bool = True,
+        use_fused_fc1_bias_act: bool = False,
         add_residual: bool = False,
         device=None,
         dtype=None,
@@ -26,6 +27,7 @@ class NovaDiTMLP(nn.Module):
         self.activation = activation
         self.dropout_p = dropout_p
         self.use_fused_gate_act = use_fused_gate_act
+        self.use_fused_fc1_bias_act = use_fused_fc1_bias_act
         self.add_residual = add_residual
 
         self.fc1 = nn.Linear(hidden_size, 2 * intermediate_size, bias=bias, **factory_kwargs)
@@ -34,12 +36,15 @@ class NovaDiTMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
-        x = self.fc1(x)
 
-        if self.use_fused_gate_act:
-            x = fused_gate_act(x, activation=self.activation)
+        if self.use_fused_fc1_bias_act:
+            x = fused_fc1_bias_act(x, self.fc1.weight, self.fc1.bias, self.activation)
         else:
-            x = gate_act_ref(x, activation=self.activation)
+            x = self.fc1(x)
+            if self.use_fused_gate_act:
+                x = fused_gate_act(x, activation=self.activation)
+            else:
+                x = gate_act_ref(x, activation=self.activation)
 
         x = self.fc2(x)
         if self.dropout_p > 0:

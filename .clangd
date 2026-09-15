@@ -32,3 +32,7 @@ CompileFlags:
     - --cuda-path=/usr/local/cuda-12.9
     - --cuda-gpu-arch=sm_90
     - --no-cuda-version-check
+    - -D__CUDACC_VER_MAJOR__=12
+    - -D__CUDACC_VER_MINOR__=9
+    - -D__CUDA_ARCH__=1200
+    - -DCUTLASS_ARCH_MMA_SM100_SUPPORTED

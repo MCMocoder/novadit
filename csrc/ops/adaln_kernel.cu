@@ -1024,9 +1024,9 @@ std::vector<at::Tensor> fused_adaln_forward(const at::Tensor &x,
                                             const at::Tensor &shift,
                                             double eps) {
   check_adaln_inputs(x, scale, shift);
-  TORCH_CHECK(x.scalar_type() == at::kFloat || x.scalar_type() == at::kHalf ||
+  TORCH_CHECK(x.scalar_type() == at::kHalf ||
                   x.scalar_type() == at::kBFloat16,
-              "fused_adaln_forward only supports fp32/fp16/bf16 tensors");
+              "fused_adaln_forward only supports fp16/bf16 tensors");
 
   at::Tensor x_contig = x.contiguous();
   at::Tensor scale_contig = scale.reshape({x.size(0), x.size(2)}).contiguous();
@@ -1048,14 +1048,6 @@ std::vector<at::Tensor> fused_adaln_forward(const at::Tensor &x,
   float eps_f = static_cast<float>(eps);
 
   switch (x_contig.scalar_type()) {
-  case at::kFloat:
-    launch_fused_adaln_ungated_forward(
-        x_contig.data_ptr<float>(), scale_contig.data_ptr<float>(),
-        shift_contig.data_ptr<float>(), y.data_ptr<float>(),
-        mean.data_ptr<float>(), invstd.data_ptr<float>(), batch_size, seq_len,
-        hidden_size, eps_f, stream);
-    check_launch(cudaGetLastError(), "fused_adaln_forward<float>");
-    break;
   case at::kHalf:
     fused_adaln_fp16_ungated_forward(
         x_contig.data_ptr<at::Half>(), scale_contig.data_ptr<at::Half>(),
@@ -1085,9 +1077,9 @@ at::Tensor fused_adaln_forward_inference(const at::Tensor &x,
                                          const at::Tensor &shift,
                                          double eps) {
   check_adaln_inputs(x, scale, shift);
-  TORCH_CHECK(x.scalar_type() == at::kFloat || x.scalar_type() == at::kHalf ||
+  TORCH_CHECK(x.scalar_type() == at::kHalf ||
                   x.scalar_type() == at::kBFloat16,
-              "fused_adaln_forward_inference only supports fp32/fp16/bf16/fp8 tensors");
+              "fused_adaln_forward_inference only supports fp16/bf16 tensors");
 
   at::Tensor x_contig = x.contiguous();
   at::Tensor scale_contig = scale.reshape({x.size(0), x.size(2)}).contiguous();
@@ -1104,13 +1096,6 @@ at::Tensor fused_adaln_forward_inference(const at::Tensor &x,
   float eps_f = static_cast<float>(eps);
 
   switch (x_contig.scalar_type()) {
-  case at::kFloat:
-    launch_fused_adaln_ungated_forward_inference(
-        x_contig.data_ptr<float>(), scale_contig.data_ptr<float>(),
-        shift_contig.data_ptr<float>(), y.data_ptr<float>(),
-        batch_size, seq_len, hidden_size, eps_f, stream);
-    check_launch(cudaGetLastError(), "fused_adaln_forward_inference<float>");
-    break;
   case at::kHalf:
     fused_adaln_fp16_ungated_forward_inference(
         x_contig.data_ptr<at::Half>(), scale_contig.data_ptr<at::Half>(),
@@ -1164,9 +1149,9 @@ at::Tensor fused_adaln_backward_dx(const at::Tensor &dy, const at::Tensor &x,
                                    const at::Tensor &mean,
                                    const at::Tensor &invstd) {
   check_adaln_backward_dx_inputs(dy, x, scale, mean, invstd);
-  TORCH_CHECK(x.scalar_type() == at::kFloat || x.scalar_type() == at::kHalf ||
+  TORCH_CHECK(x.scalar_type() == at::kHalf ||
                   x.scalar_type() == at::kBFloat16,
-              "fused_adaln_backward_dx only supports fp32/fp16/bf16 tensors");
+              "fused_adaln_backward_dx only supports fp16/bf16 tensors");
 
   at::Tensor dy_contig = dy.contiguous();
   at::Tensor x_contig = x.contiguous();
@@ -1184,14 +1169,6 @@ at::Tensor fused_adaln_backward_dx(const at::Tensor &dy, const at::Tensor &x,
   int64_t hidden_size = x_contig.size(2);
 
   switch (x_contig.scalar_type()) {
-  case at::kFloat:
-    launch_fused_adaln_backward_dx(
-        dy_contig.data_ptr<float>(), x_contig.data_ptr<float>(),
-        scale_contig.data_ptr<float>(), mean_contig.data_ptr<float>(),
-        invstd_contig.data_ptr<float>(), dx.data_ptr<float>(), batch_size,
-        seq_len, hidden_size, stream);
-    check_launch(cudaGetLastError(), "fused_adaln_backward_dx<float>");
-    break;
   case at::kHalf:
     launch_fused_adaln_backward_dx(
         dy_contig.data_ptr<at::Half>(), x_contig.data_ptr<at::Half>(),
@@ -1221,9 +1198,9 @@ fused_adaln_backward_dparam(const at::Tensor &dy, const at::Tensor &x,
                             const at::Tensor &invstd) {
   check_adaln_backward_dparam_inputs(dy, x, mean, invstd);
   TORCH_CHECK(
-      x.scalar_type() == at::kFloat || x.scalar_type() == at::kHalf ||
+      x.scalar_type() == at::kHalf ||
           x.scalar_type() == at::kBFloat16,
-      "fused_adaln_backward_dparam only supports fp32/fp16/bf16 tensors");
+      "fused_adaln_backward_dparam only supports fp16/bf16 tensors");
 
   at::Tensor dy_contig = dy.contiguous();
   at::Tensor x_contig = x.contiguous();
@@ -1244,14 +1221,6 @@ fused_adaln_backward_dparam(const at::Tensor &dy, const at::Tensor &x,
   int64_t hidden_size = x_contig.size(2);
 
   switch (x_contig.scalar_type()) {
-  case at::kFloat:
-    launch_fused_adaln_backward_dparam(
-        dy_contig.data_ptr<float>(), x_contig.data_ptr<float>(),
-        mean_contig.data_ptr<float>(), invstd_contig.data_ptr<float>(),
-        dscale.data_ptr<float>(), dshift.data_ptr<float>(), batch_size, seq_len,
-        hidden_size, stream);
-    check_launch(cudaGetLastError(), "fused_adaln_backward_dparam<float>");
-    break;
   case at::kHalf:
     launch_fused_adaln_backward_dparam(
         dy_contig.data_ptr<at::Half>(), x_contig.data_ptr<at::Half>(),

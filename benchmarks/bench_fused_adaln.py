@@ -63,8 +63,6 @@ def cuda_event_benchmark(
 
 
 def tolerances(dtype: torch.dtype) -> tuple[float, float]:
-    if dtype == torch.float32:
-        return 5e-4, 5e-4
     if dtype == torch.float16:
         return 4e-2, 4e-2
     if dtype == torch.bfloat16:
@@ -73,8 +71,6 @@ def tolerances(dtype: torch.dtype) -> tuple[float, float]:
 
 
 def relative_error_floor(dtype: torch.dtype) -> float:
-    if dtype == torch.float32:
-        return 1e-6
     if dtype == torch.float16:
         return 1e-3
     if dtype == torch.bfloat16:
@@ -556,7 +552,7 @@ def format_report(results: list[BenchmarkResult]) -> str:
             "Backward includes dx, dscale, and dshift.",
             "Backward dx compares the CUDA dx kernel with the PyTorch formula.",
             "Backward dparam compares the CUDA dscale/dshift kernel with PyTorch reductions.",
-            "max_rel uses denominator floors: fp32=1e-6, fp16=1e-3, bf16=1e-2.",
+            "max_rel uses denominator floors: fp16=1e-3, bf16=1e-2.",
             "rel_l2 is ||actual - expected||_2 / ||expected||_2.",
             "Latency values are CUDA event medians; allocations are included.",
         ]
@@ -569,8 +565,6 @@ def parse_dtype(name: str) -> torch.dtype:
         return torch.float16
     if name == "bf16":
         return torch.bfloat16
-    if name == "fp32":
-        return torch.float32
     raise ValueError(f"Unsupported dtype: {name}")
 
 
@@ -593,8 +587,8 @@ def main() -> None:
     parser.add_argument(
         "--dtypes",
         nargs="+",
-        default=["fp16", "bf16", "fp32"],
-        choices=["fp16", "bf16", "fp32"],
+        default=["fp16", "bf16"],
+        choices=["fp16", "bf16"],
     )
     args = parser.parse_args()
 
