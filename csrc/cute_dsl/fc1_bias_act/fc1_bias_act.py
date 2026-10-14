@@ -122,7 +122,7 @@ class FC1GatedActSM120BF16Kernel:
         # 16 x 16 per repetition, so 2 x 16 x 16 x 2 = 32 regs/lane suffices and
         # the reallocation target can drop.  Register budget at 1 CTA/SM:
         # 8 warps * 32 * 168 + 32 * 40 = 44288 <= 65536.
-        self.mma_register_requirement = 232 if self.num_mma_warps <= 4 else 168
+        self.mma_register_requirement = 224
 
         self.fc1_output_size = None if shape is None else shape.intermediate_size * 2
         self.fc2_output_size = None if shape is None else shape.hidden_size
