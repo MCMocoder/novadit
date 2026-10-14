@@ -216,9 +216,7 @@ def test_fused_fc1_bias_act_matches_reference(
 
     x = torch.randn(batch_size, seq_len, H, device=device, dtype=torch_dtype)
     weight = torch.randn(2 * I, H, device=device, dtype=torch_dtype)
-    bias = (
-        torch.randn(2 * I, device=device, dtype=torch_dtype) if has_bias else None
-    )
+    bias = torch.randn(2 * I, device=device, dtype=torch_dtype) if has_bias else None
 
     y_ref = fc1_bias_act_ref(x, weight, bias, activation)
     y_fused = fused_fc1_bias_act(x, weight, bias, activation)
@@ -247,7 +245,12 @@ def test_kernel_class_construction_defaults() -> None:
     assert kernel.tile_shape_mnk == SM120_DEFAULT_TILE_SHAPE_MNK
     assert kernel.atom_layout == SM120_DEFAULT_ATOM_LAYOUT_MNK
     assert kernel.cluster_shape_mnk == (1, 1, 1)
-    assert kernel.threads_per_cta == (4 + 1) * 32
+    assert kernel.num_mma_warps == (
+        SM120_DEFAULT_ATOM_LAYOUT_MNK[0]
+        * SM120_DEFAULT_ATOM_LAYOUT_MNK[1]
+        * SM120_DEFAULT_ATOM_LAYOUT_MNK[2]
+    )
+    assert kernel.threads_per_cta == (kernel.num_mma_warps + 1) * 32
     assert kernel.occupancy == 1
 
 
@@ -260,9 +263,7 @@ def test_kernel_class_construction_with_shape() -> None:
         FusedGatedMlpShape,
     )
 
-    shape = FusedGatedMlpShape(
-        batch_tokens=128, hidden_size=768, intermediate_size=768
-    )
+    shape = FusedGatedMlpShape(batch_tokens=128, hidden_size=768, intermediate_size=768)
     kernel = FC1GatedActSM120BF16Kernel(shape)
     assert kernel.shape is shape
     assert kernel.a_dtype == cutlass.Float16
@@ -306,9 +307,7 @@ def test_kernel_rejects_bad_mma_inst_mnk() -> None:
         FusedGatedMlpShape,
     )
 
-    shape = FusedGatedMlpShape(
-        batch_tokens=64, hidden_size=256, intermediate_size=256
-    )
+    shape = FusedGatedMlpShape(batch_tokens=64, hidden_size=256, intermediate_size=256)
     kernel = FC1GatedActSM120BF16Kernel.__new__(FC1GatedActSM120BF16Kernel)
     kernel.__init__ = lambda self: None
     kernel.shape = shape
@@ -394,9 +393,7 @@ def test_fused_gated_mlp_shape_is_frozen() -> None:
 
     from csrc.cute_dsl.fc1_bias_act.fc1_bias_act import FusedGatedMlpShape
 
-    shape = FusedGatedMlpShape(
-        batch_tokens=128, hidden_size=768, intermediate_size=768
-    )
+    shape = FusedGatedMlpShape(batch_tokens=128, hidden_size=768, intermediate_size=768)
     with pytest.raises(dataclasses.FrozenInstanceError):
         shape.batch_tokens = 256  # type: ignore[misc]
 
@@ -442,7 +439,8 @@ def _requires_gpu_and_cutlass() -> None:
 @pytest.mark.parametrize("dtype_name", ["float16", "bfloat16"])
 @pytest.mark.parametrize("activation", ["silu", "gelu"])
 def test_fc1_gated_act_jit_matches_cublaslt(
-    dtype_name: str, activation: str,
+    dtype_name: str,
+    activation: str,
 ) -> None:
     _requires_gpu_and_cutlass()
 
@@ -452,7 +450,8 @@ def test_fc1_gated_act_jit_matches_cublaslt(
     import cutlass.cute as cute
     import cutlass.torch as cutlass_torch
     from csrc.cute_dsl.fc1_bias_act.fc1_bias_act import (
-        ACT_GELU, ACT_SILU,
+        ACT_GELU,
+        ACT_SILU,
         FC1GatedActSM120BF16Kernel,
         FusedGatedMlpShape,
     )
@@ -493,8 +492,14 @@ def test_fc1_gated_act_jit_matches_cublaslt(
     stream = cutlass_torch.default_stream()
 
     compiled = cute.compile(
-        kernel, x_cute, w_gate_cute, w_value_cute, y_cute,
-        act_id, max_active_clusters, stream,
+        kernel,
+        x_cute,
+        w_gate_cute,
+        w_value_cute,
+        y_cute,
+        act_id,
+        max_active_clusters,
+        stream,
     )
     compiled(x_cute, w_gate_cute, w_value_cute, y_cute, stream)
     torch.cuda.synchronize()
@@ -539,7 +544,7 @@ def test_backward_dx_kernel_class_construction_defaults() -> None:
     assert kernel.tile_shape_mnk == SM120_DEFAULT_TILE_SHAPE_MNK
     assert kernel.atom_layout == SM120_DEFAULT_ATOM_LAYOUT_MNK
     assert kernel.cluster_shape_mnk == (1, 1, 1)
-    assert kernel.threads_per_cta == (4 + 1) * 32
+    assert kernel.threads_per_cta == (kernel.num_mma_warps + 1) * 32
     assert kernel.occupancy == 1
 
 
@@ -638,8 +643,13 @@ def test_backward_dx_jit_matches_torch_mm(
 
     compiled = cute.compile(
         kernel,
-        dgate_cute, dvalue_cute, w_gate_cute, w_value_cute, dx_cute,
-        max_active_clusters, stream,
+        dgate_cute,
+        dvalue_cute,
+        w_gate_cute,
+        w_value_cute,
+        dx_cute,
+        max_active_clusters,
+        stream,
     )
     compiled(dgate_cute, dvalue_cute, w_gate_cute, w_value_cute, dx_cute, stream)
     torch.cuda.synchronize()
@@ -701,7 +711,11 @@ def test_fused_fc1_bias_act_backward_dx_plugin() -> None:
         z.requires_grad_(True)
         z.retain_grad()
         gate, value = z.chunk(2, dim=-1)
-        y_ref = value * F.silu(gate) if activation == "silu" else value * F.gelu(gate, approximate="tanh")
+        y_ref = (
+            value * F.silu(gate)
+            if activation == "silu"
+            else value * F.gelu(gate, approximate="tanh")
+        )
         y_ref.sum().backward()
         dz = z.grad.reshape(M, -1)
 
@@ -716,6 +730,5 @@ def test_fused_fc1_bias_act_backward_dx_plugin() -> None:
         atol = 3e-2 if dtype == torch.bfloat16 else 7e-2
         max_err = (dx_cute.float() - dx_ref.float()).abs().max().item()
         assert max_err < atol, (
-            f"Backward dx mismatch for {dtype}: "
-            f"max_abs_err={max_err:.4e} > atol={atol}"
+            f"Backward dx mismatch for {dtype}: max_abs_err={max_err:.4e} > atol={atol}"
         )

@@ -18,7 +18,13 @@ ACT_SILU = 0
 ACT_GELU = 1
 
 SM120_BF16_MMA_INST_MNK = (16, 8, 16)
-SM120_DEFAULT_ATOM_LAYOUT_MNK = (2, 2, 1)
+
+# Warp assignment for the MMA warp group: ``prod(atom_layout)`` MMA warps plus
+# one dedicated TMA producer warp.
+#   (4, 2, 1) -> 8 MMA warps + 1 TMA warp = 288 threads  (default)
+#   (2, 2, 1) -> 4 MMA warps + 1 TMA warp = 160 threads  (legacy, A/B baseline)
+SM120_DEFAULT_ATOM_LAYOUT_MNK = (4, 2, 1)
+SM120_SUPPORTED_ATOM_LAYOUTS_MNK = ((4, 2, 1), (2, 2, 1))
 SM120_DEFAULT_TILE_SHAPE_MNK = (64, 64, 64)
 SM120_SUPPORTED_TILE_SHAPES_MNK = (
     (64, 64, 64),
@@ -89,9 +95,7 @@ class FC1GatedActSM120BF16Kernel:
         self.cta_layout_mnk = None
 
         self.occupancy = 1
-        self.num_mma_warps = (
-            self.atom_layout[0] * self.atom_layout[1] * self.atom_layout[2]
-        )
+        self.num_mma_warps = self.atom_layout[0] * self.atom_layout[1] * self.atom_layout[2]
         self.num_threads_per_warp = 32
         self.threads_per_cta = (self.num_mma_warps + 1) * self.num_threads_per_warp
         self.buffer_align_bytes = 1024
@@ -112,7 +116,13 @@ class FC1GatedActSM120BF16Kernel:
             num_threads=self.num_mma_warps * self.num_threads_per_warp,
         )
         self.load_register_requirement = 40
-        self.mma_register_requirement = 232
+        # Each MMA warp owns two fp32 accumulators (gate + value).  At
+        # atom_layout (2, 2, 1) a warp holds 2 x 32 x 32 fp32 values
+        # (64 regs/lane); at (4, 2, 1) the per-warp value tile halves to
+        # 16 x 16 per repetition, so 2 x 16 x 16 x 2 = 32 regs/lane suffices and
+        # the reallocation target can drop.  Register budget at 1 CTA/SM:
+        # 8 warps * 32 * 168 + 32 * 40 = 44288 <= 65536.
+        self.mma_register_requirement = 232 if self.num_mma_warps <= 4 else 168
 
         self.fc1_output_size = None if shape is None else shape.intermediate_size * 2
         self.fc2_output_size = None if shape is None else shape.hidden_size
@@ -126,9 +136,10 @@ class FC1GatedActSM120BF16Kernel:
             raise TypeError("FC1GatedActSM120BF16Kernel requires FP16 or BF16 output/bias")
         if self.acc_dtype != cutlass.Float32:
             raise TypeError("SM120 BF16 MMA requires Float32 accumulation")
-        if self.atom_layout != SM120_DEFAULT_ATOM_LAYOUT_MNK:
+        if self.atom_layout not in SM120_SUPPORTED_ATOM_LAYOUTS_MNK:
             raise ValueError(
-                "SM120 BF16 path is validated with atom_layout_mnk=(2, 2, 1)"
+                f"SM120 BF16 path supports atom_layout_mnk in "
+                f"{SM120_SUPPORTED_ATOM_LAYOUTS_MNK}, got {self.atom_layout}"
             )
         if self.mma_inst_mnk != SM120_BF16_MMA_INST_MNK:
             raise ValueError("SM120 BF16 warp MMA instruction must be m16n8k16")
@@ -152,13 +163,9 @@ class FC1GatedActSM120BF16Kernel:
         if self.shape.intermediate_size <= 0:
             raise ValueError("intermediate_size must be positive")
         if self.shape.hidden_size % self.mma_inst_mnk[2] != 0:
-            raise ValueError(
-                "hidden_size must be a multiple of 16 for m16n8k16 BF16 MMA"
-            )
+            raise ValueError("hidden_size must be a multiple of 16 for m16n8k16 BF16 MMA")
         if self.shape.intermediate_size % self.mma_inst_mnk[2] != 0:
-            raise ValueError(
-                "intermediate_size must be a multiple of 16 for m16n8k16 BF16 MMA"
-            )
+            raise ValueError("intermediate_size must be a multiple of 16 for m16n8k16 BF16 MMA")
 
     def _setup_attributes(self):
         op = MmaF16BF16Op(
@@ -251,23 +258,14 @@ class FC1GatedActSM120BF16Kernel:
         self.b_layout = utils.LayoutEnum.from_tensor(w_gate)
         self.c_layout = utils.LayoutEnum.from_tensor(y)
 
+        if cutlass.const_expr(self.a_dtype not in (cutlass.Float16, cutlass.BFloat16)):
+            raise TypeError("FC1GatedActSM120BF16Kernel requires FP16 or BF16 inputs")
         if cutlass.const_expr(
-            self.a_dtype not in (cutlass.Float16, cutlass.BFloat16)
-        ):
-            raise TypeError(
-                "FC1GatedActSM120BF16Kernel requires FP16 or BF16 inputs"
-            )
-        if cutlass.const_expr(
-            self.a_dtype.width != self.b_dtype.width
-            or self.a_dtype != w_value.element_type
+            self.a_dtype.width != self.b_dtype.width or self.a_dtype != w_value.element_type
         ):
             raise TypeError("Type mismatch across x / w_gate / w_value")
-        if cutlass.const_expr(
-            self.c_dtype not in (cutlass.Float16, cutlass.BFloat16)
-        ):
-            raise TypeError(
-                "FC1GatedActSM120BF16Kernel requires FP16 or BF16 output"
-            )
+        if cutlass.const_expr(self.c_dtype not in (cutlass.Float16, cutlass.BFloat16)):
+            raise TypeError("FC1GatedActSM120BF16Kernel requires FP16 or BF16 output")
 
         self._setup_attributes()
 
@@ -306,31 +304,21 @@ class FC1GatedActSM120BF16Kernel:
 
         @cute.struct
         class SharedStorage:
-            mainloop_pipeline_array_ptr: cute.struct.MemRange[
-                cutlass.Int64, self.ab_stage * 2
-            ]
+            mainloop_pipeline_array_ptr: cute.struct.MemRange[cutlass.Int64, self.ab_stage * 2]
             sA: cute.struct.Align[
-                cute.struct.MemRange[
-                    self.a_dtype, cute.cosize(self.a_smem_layout_staged)
-                ],
+                cute.struct.MemRange[self.a_dtype, cute.cosize(self.a_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
             sB_gate: cute.struct.Align[
-                cute.struct.MemRange[
-                    self.b_dtype, cute.cosize(self.b_smem_layout_staged)
-                ],
+                cute.struct.MemRange[self.b_dtype, cute.cosize(self.b_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
             sB_value: cute.struct.Align[
-                cute.struct.MemRange[
-                    self.b_dtype, cute.cosize(self.b_smem_layout_staged)
-                ],
+                cute.struct.MemRange[self.b_dtype, cute.cosize(self.b_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
             sC: cute.struct.Align[
-                cute.struct.MemRange[
-                    self.c_dtype, cute.cosize(self.epi_smem_layout_staged)
-                ],
+                cute.struct.MemRange[self.c_dtype, cute.cosize(self.epi_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
 
@@ -403,25 +391,19 @@ class FC1GatedActSM120BF16Kernel:
             cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_b_value)
             cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_c)
 
-        cta_rank_in_cluster = cute.arch.make_warp_uniform(
-            cute.arch.block_idx_in_cluster()
-        )
+        cta_rank_in_cluster = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
         cluster_coord_mnk = cta_layout_mnk.get_flat_coord(cta_rank_in_cluster)
 
-        a_mcast_mask = cute.make_layout_image_mask(
-            cta_layout_mnk, cluster_coord_mnk, mode=1
-        )
-        b_mcast_mask = cute.make_layout_image_mask(
-            cta_layout_mnk, cluster_coord_mnk, mode=0
-        )
+        a_mcast_mask = cute.make_layout_image_mask(cta_layout_mnk, cluster_coord_mnk, mode=1)
+        b_mcast_mask = cute.make_layout_image_mask(cta_layout_mnk, cluster_coord_mnk, mode=0)
         a_mcast_mask = a_mcast_mask if self.is_a_mcast else 0
         b_mcast_mask = b_mcast_mask if self.is_b_mcast else 0
         a_smem_layout = cute.slice_(a_smem_layout_staged, (None, None, 0))
         b_smem_layout = cute.slice_(b_smem_layout_staged, (None, None, 0))
         # One A + two B tiles live in smem each stage.
-        tma_copy_bytes = cute.size_in_bytes(
-            self.a_dtype, a_smem_layout
-        ) + 2 * cute.size_in_bytes(self.b_dtype, b_smem_layout)
+        tma_copy_bytes = cute.size_in_bytes(self.a_dtype, a_smem_layout) + 2 * cute.size_in_bytes(
+            self.b_dtype, b_smem_layout
+        )
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Alloc and init pipeline
@@ -431,9 +413,7 @@ class FC1GatedActSM120BF16Kernel:
 
         mainloop_pipeline_array_ptr = storage.mainloop_pipeline_array_ptr.data_ptr()
 
-        mainloop_pipeline_producer_group = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread
-        )
+        mainloop_pipeline_producer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread)
         mcast_size = self.num_mcast_ctas_a + self.num_mcast_ctas_b - 1
         consumer_arrive_cnt = mcast_size * self.num_mma_warps
         mainloop_pipeline_consumer_group = pipeline.CooperativeGroup(
@@ -456,9 +436,7 @@ class FC1GatedActSM120BF16Kernel:
         # ///////////////////////////////////////////////////////////////////////////////
         #  Generate smem tensors
         # ///////////////////////////////////////////////////////////////////////////////
-        sA = storage.sA.get_tensor(
-            a_smem_layout_staged.outer, swizzle=a_smem_layout_staged.inner
-        )
+        sA = storage.sA.get_tensor(a_smem_layout_staged.outer, swizzle=a_smem_layout_staged.inner)
         sB_gate = storage.sB_gate.get_tensor(
             b_smem_layout_staged.outer, swizzle=b_smem_layout_staged.inner
         )
@@ -506,9 +484,7 @@ class FC1GatedActSM120BF16Kernel:
             cute.group_modes(gA_mkl, 0, 2),
         )
 
-        b_cta_layout = cute.make_layout(
-            cute.slice_(cta_layout_mnk, (None, 0, 0)).shape
-        )
+        b_cta_layout = cute.make_layout(cute.slice_(cta_layout_mnk, (None, 0, 0)).shape)
         b_cta_crd = cluster_coord_mnk[0]
         tBsB_gate, tBgB_gate = cute.nvgpu.cpasync.tma_partition(
             tma_atom_b_gate,
@@ -607,16 +583,10 @@ class FC1GatedActSM120BF16Kernel:
                         mainloop_consumer_state
                     )
 
-                mainloop_pipeline.consumer_wait(
-                    mainloop_consumer_state, peek_ab_full_status
-                )
+                mainloop_pipeline.consumer_wait(mainloop_consumer_state, peek_ab_full_status)
                 tCsA_p = tCsA_copy_view[None, None, None, mainloop_consumer_state.index]
-                tCsB_gate_p = tCsB_gate_copy_view[
-                    None, None, None, mainloop_consumer_state.index
-                ]
-                tCsB_value_p = tCsB_value_copy_view[
-                    None, None, None, mainloop_consumer_state.index
-                ]
+                tCsB_gate_p = tCsB_gate_copy_view[None, None, None, mainloop_consumer_state.index]
+                tCsB_value_p = tCsB_value_copy_view[None, None, None, mainloop_consumer_state.index]
                 cute.copy(
                     smem_tiled_copy_A,
                     tCsA_p[None, None, 0],
@@ -635,9 +605,7 @@ class FC1GatedActSM120BF16Kernel:
 
                 for _k_tile in range(0, k_tile_cnt - 1, 1, unroll=1):
                     for k_block_idx in cutlass.range_constexpr(num_k_blocks):
-                        k_block_next = (
-                            0 if k_block_idx + 1 == num_k_blocks else k_block_idx + 1
-                        )
+                        k_block_next = 0 if k_block_idx + 1 == num_k_blocks else k_block_idx + 1
 
                         if k_block_idx == num_k_blocks - 1:
                             mainloop_pipeline.consumer_release(mainloop_consumer_state)
@@ -648,9 +616,7 @@ class FC1GatedActSM120BF16Kernel:
                                 mainloop_consumer_state
                             )
 
-                            tCsA_p = tCsA_copy_view[
-                                None, None, None, mainloop_consumer_state.index
-                            ]
+                            tCsA_p = tCsA_copy_view[None, None, None, mainloop_consumer_state.index]
                             tCsB_gate_p = tCsB_gate_copy_view[
                                 None, None, None, mainloop_consumer_state.index
                             ]
@@ -693,9 +659,7 @@ class FC1GatedActSM120BF16Kernel:
                 # end of for loop
                 # Hoist out last k_tile
                 for k_block_idx in cutlass.range_constexpr(num_k_blocks):
-                    k_block_next = (
-                        0 if k_block_idx + 1 == num_k_blocks else k_block_idx + 1
-                    )
+                    k_block_next = 0 if k_block_idx + 1 == num_k_blocks else k_block_idx + 1
 
                     if k_block_idx == num_k_blocks - 1:
                         mainloop_pipeline.consumer_release(mainloop_consumer_state)
@@ -746,9 +710,7 @@ class FC1GatedActSM120BF16Kernel:
                     self.c_dtype,
                 )
                 tiled_copy_C_Atom = cute.make_tiled_copy_C_atom(copy_atom_C, tiled_mma)
-                tiled_copy_r2s = cute.make_tiled_copy_S(
-                    copy_atom_r2s, tiled_copy_C_Atom
-                )
+                tiled_copy_r2s = cute.make_tiled_copy_S(copy_atom_r2s, tiled_copy_C_Atom)
 
                 thr_copy_r2s = tiled_copy_r2s.get_slice(tidx)
                 tRS_sD = thr_copy_r2s.partition_D(sC)
@@ -773,9 +735,7 @@ class FC1GatedActSM120BF16Kernel:
 
                 epi_tile_num = cute.size(tcgc_for_tma_partition, mode=[1])
                 epi_tile_shape = tcgc_for_tma_partition.shape[1]
-                epi_tile_layout = cute.make_layout(
-                    epi_tile_shape, stride=(1, epi_tile_shape[0])
-                )
+                epi_tile_layout = cute.make_layout(epi_tile_shape, stride=(1, epi_tile_shape[0]))
 
                 tma_store_producer_group = pipeline.CooperativeGroup(
                     pipeline.Agent.Thread,
@@ -805,9 +765,7 @@ class FC1GatedActSM120BF16Kernel:
                             )
                         tRS_rD[epi_v] = acc_v * act_val
 
-                    tRS_rD_out = cute.make_rmem_tensor(
-                        tRS_rD_layout.shape, self.c_dtype
-                    )
+                    tRS_rD_out = cute.make_rmem_tensor(tRS_rD_layout.shape, self.c_dtype)
                     acc_vec = tRS_rD.load()
                     tRS_rD_out.store(acc_vec.to(self.c_dtype))
 
@@ -843,12 +801,8 @@ class FC1GatedActSM120BF16Kernel:
             while work_tile.is_valid_tile:
                 tile_coord_mnl = work_tile.tile_idx
                 tAgA_mkl = tAgA[(None, tile_coord_mnl[0], None, tile_coord_mnl[2])]
-                tBgB_gate_nkl = tBgB_gate[
-                    (None, tile_coord_mnl[1], None, tile_coord_mnl[2])
-                ]
-                tBgB_value_nkl = tBgB_value[
-                    (None, tile_coord_mnl[1], None, tile_coord_mnl[2])
-                ]
+                tBgB_gate_nkl = tBgB_gate[(None, tile_coord_mnl[1], None, tile_coord_mnl[2])]
+                tBgB_value_nkl = tBgB_value[(None, tile_coord_mnl[1], None, tile_coord_mnl[2])]
 
                 mainloop_producer_state.reset_count()
 
@@ -857,44 +811,30 @@ class FC1GatedActSM120BF16Kernel:
 
                     tAgA_k = tAgA_mkl[(None, mainloop_producer_state.count)]
                     tAsA_pipe = tAsA[(None, mainloop_producer_state.index)]
-                    tBgB_gate_k = tBgB_gate_nkl[
-                        (None, mainloop_producer_state.count)
-                    ]
-                    tBsB_gate_pipe = tBsB_gate[
-                        (None, mainloop_producer_state.index)
-                    ]
-                    tBgB_value_k = tBgB_value_nkl[
-                        (None, mainloop_producer_state.count)
-                    ]
-                    tBsB_value_pipe = tBsB_value[
-                        (None, mainloop_producer_state.index)
-                    ]
+                    tBgB_gate_k = tBgB_gate_nkl[(None, mainloop_producer_state.count)]
+                    tBsB_gate_pipe = tBsB_gate[(None, mainloop_producer_state.index)]
+                    tBgB_value_k = tBgB_value_nkl[(None, mainloop_producer_state.count)]
+                    tBsB_value_pipe = tBsB_value[(None, mainloop_producer_state.index)]
 
                     cute.copy(
                         tma_atom_a,
                         tAgA_k,
                         tAsA_pipe,
-                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(
-                            mainloop_producer_state
-                        ),
+                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(mainloop_producer_state),
                         mcast_mask=a_mcast_mask,
                     )
                     cute.copy(
                         tma_atom_b_gate,
                         tBgB_gate_k,
                         tBsB_gate_pipe,
-                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(
-                            mainloop_producer_state
-                        ),
+                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(mainloop_producer_state),
                         mcast_mask=b_mcast_mask,
                     )
                     cute.copy(
                         tma_atom_b_value,
                         tBgB_value_k,
                         tBsB_value_pipe,
-                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(
-                            mainloop_producer_state
-                        ),
+                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(mainloop_producer_state),
                         mcast_mask=b_mcast_mask,
                     )
                     mainloop_pipeline.producer_commit(mainloop_producer_state)
@@ -928,15 +868,12 @@ class FC1GatedActSM120BF16Kernel:
         a_shape = cute.slice_(tile_shape_mnk, (None, 0, None))
         b_shape = cute.slice_(tile_shape_mnk, (0, None, None))
         ab_bytes_per_stage = (
-            cute.size(a_shape) * a_dtype.width // 8
-            + 2 * cute.size(b_shape) * b_dtype.width // 8
+            cute.size(a_shape) * a_dtype.width // 8 + 2 * cute.size(b_shape) * b_dtype.width // 8
         )
         mbar_helpers_bytes = 1024
 
         ab_stage = (
-            (smem_capacity - occupancy * 1024) // occupancy
-            - mbar_helpers_bytes
-            - epi_bytes
+            (smem_capacity - occupancy * 1024) // occupancy - mbar_helpers_bytes - epi_bytes
         ) // ab_bytes_per_stage
         return ab_stage, epi_stage
 
@@ -984,9 +921,7 @@ class FC1GatedActSM120BF16Kernel:
         gc = cute.zipped_divide(c, tiler=c_shape)
         num_ctas_mnl = gc[(0, (None, None, None))].shape
         cluster_shape_mnl = (1, 1, 1)
-        tile_sched_params = utils.PersistentTileSchedulerParams(
-            num_ctas_mnl, cluster_shape_mnl
-        )
+        tile_sched_params = utils.PersistentTileSchedulerParams(num_ctas_mnl, cluster_shape_mnl)
         grid = utils.StaticPersistentTileScheduler.get_grid_shape(
             tile_sched_params, max_active_clusters
         )
@@ -1073,9 +1008,7 @@ class FC1GatedActSM120BF16BackwardDxKernel:
         self.cta_layout_mnk = None
 
         self.occupancy = 1
-        self.num_mma_warps = (
-            self.atom_layout[0] * self.atom_layout[1] * self.atom_layout[2]
-        )
+        self.num_mma_warps = self.atom_layout[0] * self.atom_layout[1] * self.atom_layout[2]
         self.num_threads_per_warp = 32
         self.threads_per_cta = (self.num_mma_warps + 1) * self.num_threads_per_warp
         self.buffer_align_bytes = 1024
@@ -1096,24 +1029,21 @@ class FC1GatedActSM120BF16BackwardDxKernel:
             num_threads=self.num_mma_warps * self.num_threads_per_warp,
         )
         self.load_register_requirement = 40
-        self.mma_register_requirement = 232
+        self.mma_register_requirement = 232 if self.num_mma_warps <= 4 else 168
 
         self._validate_static_config()
 
     def _validate_static_config(self) -> None:
         if self.ab_dtype not in (cutlass.Float16, cutlass.BFloat16):
-            raise TypeError(
-                "FC1GatedActSM120BF16BackwardDxKernel requires FP16 or BF16 A/B inputs"
-            )
+            raise TypeError("FC1GatedActSM120BF16BackwardDxKernel requires FP16 or BF16 A/B inputs")
         if self.output_dtype not in (cutlass.Float16, cutlass.BFloat16):
-            raise TypeError(
-                "FC1GatedActSM120BF16BackwardDxKernel requires FP16 or BF16 output"
-            )
+            raise TypeError("FC1GatedActSM120BF16BackwardDxKernel requires FP16 or BF16 output")
         if self.acc_dtype != cutlass.Float32:
             raise TypeError("SM120 BF16 MMA requires Float32 accumulation")
-        if self.atom_layout != SM120_DEFAULT_ATOM_LAYOUT_MNK:
+        if self.atom_layout not in SM120_SUPPORTED_ATOM_LAYOUTS_MNK:
             raise ValueError(
-                "SM120 BF16 path is validated with atom_layout_mnk=(2, 2, 1)"
+                f"SM120 BF16 path supports atom_layout_mnk in "
+                f"{SM120_SUPPORTED_ATOM_LAYOUTS_MNK}, got {self.atom_layout}"
             )
         if self.mma_inst_mnk != SM120_BF16_MMA_INST_MNK:
             raise ValueError("SM120 BF16 warp MMA instruction must be m16n8k16")
@@ -1134,13 +1064,9 @@ class FC1GatedActSM120BF16BackwardDxKernel:
         if self.shape.intermediate_size <= 0:
             raise ValueError("intermediate_size must be positive")
         if self.shape.hidden_size % self.mma_inst_mnk[2] != 0:
-            raise ValueError(
-                "hidden_size must be a multiple of 16 for m16n8k16 BF16 MMA"
-            )
+            raise ValueError("hidden_size must be a multiple of 16 for m16n8k16 BF16 MMA")
         if self.shape.intermediate_size % self.mma_inst_mnk[2] != 0:
-            raise ValueError(
-                "intermediate_size must be a multiple of 16 for m16n8k16 BF16 MMA"
-            )
+            raise ValueError("intermediate_size must be a multiple of 16 for m16n8k16 BF16 MMA")
 
     def _setup_attributes(self):
         op = MmaF16BF16Op(
@@ -1233,24 +1159,16 @@ class FC1GatedActSM120BF16BackwardDxKernel:
         self.b_layout = utils.LayoutEnum.from_tensor(w_gate)
         self.c_layout = utils.LayoutEnum.from_tensor(dx)
 
-        if cutlass.const_expr(
-            self.a_dtype not in (cutlass.Float16, cutlass.BFloat16)
-        ):
-            raise TypeError(
-                "FC1GatedActSM120BF16BackwardDxKernel requires FP16 or BF16 inputs"
-            )
+        if cutlass.const_expr(self.a_dtype not in (cutlass.Float16, cutlass.BFloat16)):
+            raise TypeError("FC1GatedActSM120BF16BackwardDxKernel requires FP16 or BF16 inputs")
         if cutlass.const_expr(
             self.a_dtype.width != self.b_dtype.width
             or self.a_dtype != dvalue.element_type
             or self.b_dtype != w_value.element_type
         ):
             raise TypeError("Type mismatch across dgate / dvalue / w_gate / w_value")
-        if cutlass.const_expr(
-            self.c_dtype not in (cutlass.Float16, cutlass.BFloat16)
-        ):
-            raise TypeError(
-                "FC1GatedActSM120BF16BackwardDxKernel requires FP16 or BF16 output"
-            )
+        if cutlass.const_expr(self.c_dtype not in (cutlass.Float16, cutlass.BFloat16)):
+            raise TypeError("FC1GatedActSM120BF16BackwardDxKernel requires FP16 or BF16 output")
 
         self._setup_attributes()
 
@@ -1296,37 +1214,25 @@ class FC1GatedActSM120BF16BackwardDxKernel:
 
         @cute.struct
         class SharedStorage:
-            mainloop_pipeline_array_ptr: cute.struct.MemRange[
-                cutlass.Int64, self.ab_stage * 2
-            ]
+            mainloop_pipeline_array_ptr: cute.struct.MemRange[cutlass.Int64, self.ab_stage * 2]
             sA_dgate: cute.struct.Align[
-                cute.struct.MemRange[
-                    self.a_dtype, cute.cosize(self.a_smem_layout_staged)
-                ],
+                cute.struct.MemRange[self.a_dtype, cute.cosize(self.a_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
             sA_dvalue: cute.struct.Align[
-                cute.struct.MemRange[
-                    self.a_dtype, cute.cosize(self.a_smem_layout_staged)
-                ],
+                cute.struct.MemRange[self.a_dtype, cute.cosize(self.a_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
             sB_w_gate: cute.struct.Align[
-                cute.struct.MemRange[
-                    self.b_dtype, cute.cosize(self.b_smem_layout_staged)
-                ],
+                cute.struct.MemRange[self.b_dtype, cute.cosize(self.b_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
             sB_w_value: cute.struct.Align[
-                cute.struct.MemRange[
-                    self.b_dtype, cute.cosize(self.b_smem_layout_staged)
-                ],
+                cute.struct.MemRange[self.b_dtype, cute.cosize(self.b_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
             sC: cute.struct.Align[
-                cute.struct.MemRange[
-                    self.c_dtype, cute.cosize(self.epi_smem_layout_staged)
-                ],
+                cute.struct.MemRange[self.c_dtype, cute.cosize(self.epi_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
 
@@ -1395,17 +1301,11 @@ class FC1GatedActSM120BF16BackwardDxKernel:
             cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_b2)
             cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_c)
 
-        cta_rank_in_cluster = cute.arch.make_warp_uniform(
-            cute.arch.block_idx_in_cluster()
-        )
+        cta_rank_in_cluster = cute.arch.make_warp_uniform(cute.arch.block_idx_in_cluster())
         cluster_coord_mnk = cta_layout_mnk.get_flat_coord(cta_rank_in_cluster)
 
-        a_mcast_mask = cute.make_layout_image_mask(
-            cta_layout_mnk, cluster_coord_mnk, mode=1
-        )
-        b_mcast_mask = cute.make_layout_image_mask(
-            cta_layout_mnk, cluster_coord_mnk, mode=0
-        )
+        a_mcast_mask = cute.make_layout_image_mask(cta_layout_mnk, cluster_coord_mnk, mode=1)
+        b_mcast_mask = cute.make_layout_image_mask(cta_layout_mnk, cluster_coord_mnk, mode=0)
         a_mcast_mask = a_mcast_mask if self.is_a_mcast else 0
         b_mcast_mask = b_mcast_mask if self.is_b_mcast else 0
         a_smem_layout = cute.slice_(a_smem_layout_staged, (None, None, 0))
@@ -1419,9 +1319,7 @@ class FC1GatedActSM120BF16BackwardDxKernel:
 
         mainloop_pipeline_array_ptr = storage.mainloop_pipeline_array_ptr.data_ptr()
 
-        mainloop_pipeline_producer_group = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread
-        )
+        mainloop_pipeline_producer_group = pipeline.CooperativeGroup(pipeline.Agent.Thread)
         mcast_size = self.num_mcast_ctas_a + self.num_mcast_ctas_b - 1
         consumer_arrive_cnt = mcast_size * self.num_mma_warps
         mainloop_pipeline_consumer_group = pipeline.CooperativeGroup(
@@ -1500,9 +1398,7 @@ class FC1GatedActSM120BF16BackwardDxKernel:
             cute.group_modes(gA2_mkl, 0, 2),
         )
 
-        b_cta_layout = cute.make_layout(
-            cute.slice_(cta_layout_mnk, (None, 0, 0)).shape
-        )
+        b_cta_layout = cute.make_layout(cute.slice_(cta_layout_mnk, (None, 0, 0)).shape)
         b_cta_crd = cluster_coord_mnk[0]
         tBsB1, tBgB1 = cute.nvgpu.cpasync.tma_partition(
             tma_atom_b1,
@@ -1594,9 +1490,7 @@ class FC1GatedActSM120BF16BackwardDxKernel:
                         mainloop_consumer_state
                     )
 
-                mainloop_pipeline.consumer_wait(
-                    mainloop_consumer_state, peek_ab_full_status
-                )
+                mainloop_pipeline.consumer_wait(mainloop_consumer_state, peek_ab_full_status)
                 tCsA1_p = tCsA1_copy_view[None, None, None, mainloop_consumer_state.index]
                 tCsA2_p = tCsA2_copy_view[None, None, None, mainloop_consumer_state.index]
                 tCsB1_p = tCsB1_copy_view[None, None, None, mainloop_consumer_state.index]
@@ -1624,9 +1518,7 @@ class FC1GatedActSM120BF16BackwardDxKernel:
 
                 for _k_tile in range(0, k_tile_cnt - 1, 1, unroll=1):
                     for k_block_idx in cutlass.range_constexpr(num_k_blocks):
-                        k_block_next = (
-                            0 if k_block_idx + 1 == num_k_blocks else k_block_idx + 1
-                        )
+                        k_block_next = 0 if k_block_idx + 1 == num_k_blocks else k_block_idx + 1
 
                         if k_block_idx == num_k_blocks - 1:
                             mainloop_pipeline.consumer_release(mainloop_consumer_state)
@@ -1688,9 +1580,7 @@ class FC1GatedActSM120BF16BackwardDxKernel:
                             acc_dx,
                         )
                 for k_block_idx in cutlass.range_constexpr(num_k_blocks):
-                    k_block_next = (
-                        0 if k_block_idx + 1 == num_k_blocks else k_block_idx + 1
-                    )
+                    k_block_next = 0 if k_block_idx + 1 == num_k_blocks else k_block_idx + 1
 
                     if k_block_idx == num_k_blocks - 1:
                         mainloop_pipeline.consumer_release(mainloop_consumer_state)
@@ -1742,9 +1632,7 @@ class FC1GatedActSM120BF16BackwardDxKernel:
                     self.c_dtype,
                 )
                 tiled_copy_C_Atom = cute.make_tiled_copy_C_atom(copy_atom_C, tiled_mma)
-                tiled_copy_r2s = cute.make_tiled_copy_S(
-                    copy_atom_r2s, tiled_copy_C_Atom
-                )
+                tiled_copy_r2s = cute.make_tiled_copy_S(copy_atom_r2s, tiled_copy_C_Atom)
 
                 thr_copy_r2s = tiled_copy_r2s.get_slice(tidx)
                 tRS_sD = thr_copy_r2s.partition_D(sC)
@@ -1768,9 +1656,7 @@ class FC1GatedActSM120BF16BackwardDxKernel:
 
                 epi_tile_num = cute.size(tcgc_for_tma_partition, mode=[1])
                 epi_tile_shape = tcgc_for_tma_partition.shape[1]
-                epi_tile_layout = cute.make_layout(
-                    epi_tile_shape, stride=(1, epi_tile_shape[0])
-                )
+                epi_tile_layout = cute.make_layout(epi_tile_shape, stride=(1, epi_tile_shape[0]))
 
                 tma_store_producer_group = pipeline.CooperativeGroup(
                     pipeline.Agent.Thread,
@@ -1785,9 +1671,7 @@ class FC1GatedActSM120BF16BackwardDxKernel:
                     for epi_v in cutlass.range_constexpr(size_tRS_rD):
                         tRS_rD[epi_v] = tRS_rAcc[epi_idx * size_tRS_rD + epi_v]
 
-                    tRS_rD_out = cute.make_rmem_tensor(
-                        tRS_rD_layout.shape, self.c_dtype
-                    )
+                    tRS_rD_out = cute.make_rmem_tensor(tRS_rD_layout.shape, self.c_dtype)
                     acc_vec = tRS_rD.load()
                     tRS_rD_out.store(acc_vec.to(self.c_dtype))
 
@@ -1822,12 +1706,8 @@ class FC1GatedActSM120BF16BackwardDxKernel:
                 tile_coord_mnl = work_tile.tile_idx
                 tAgA1_mkl = tAgA1[(None, tile_coord_mnl[0], None, tile_coord_mnl[2])]
                 tAgA2_mkl = tAgA2[(None, tile_coord_mnl[0], None, tile_coord_mnl[2])]
-                tBgB1_nkl = tBgB1[
-                    (None, tile_coord_mnl[1], None, tile_coord_mnl[2])
-                ]
-                tBgB2_nkl = tBgB2[
-                    (None, tile_coord_mnl[1], None, tile_coord_mnl[2])
-                ]
+                tBgB1_nkl = tBgB1[(None, tile_coord_mnl[1], None, tile_coord_mnl[2])]
+                tBgB2_nkl = tBgB2[(None, tile_coord_mnl[1], None, tile_coord_mnl[2])]
 
                 mainloop_producer_state.reset_count()
 
@@ -1838,53 +1718,37 @@ class FC1GatedActSM120BF16BackwardDxKernel:
                     tAsA1_pipe = tAsA1[(None, mainloop_producer_state.index)]
                     tAgA2_k = tAgA2_mkl[(None, mainloop_producer_state.count)]
                     tAsA2_pipe = tAsA2[(None, mainloop_producer_state.index)]
-                    tBgB1_k = tBgB1_nkl[
-                        (None, mainloop_producer_state.count)
-                    ]
-                    tBsB1_pipe = tBsB1[
-                        (None, mainloop_producer_state.index)
-                    ]
-                    tBgB2_k = tBgB2_nkl[
-                        (None, mainloop_producer_state.count)
-                    ]
-                    tBsB2_pipe = tBsB2[
-                        (None, mainloop_producer_state.index)
-                    ]
+                    tBgB1_k = tBgB1_nkl[(None, mainloop_producer_state.count)]
+                    tBsB1_pipe = tBsB1[(None, mainloop_producer_state.index)]
+                    tBgB2_k = tBgB2_nkl[(None, mainloop_producer_state.count)]
+                    tBsB2_pipe = tBsB2[(None, mainloop_producer_state.index)]
 
                     cute.copy(
                         tma_atom_a1,
                         tAgA1_k,
                         tAsA1_pipe,
-                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(
-                            mainloop_producer_state
-                        ),
+                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(mainloop_producer_state),
                         mcast_mask=a_mcast_mask,
                     )
                     cute.copy(
                         tma_atom_a2,
                         tAgA2_k,
                         tAsA2_pipe,
-                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(
-                            mainloop_producer_state
-                        ),
+                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(mainloop_producer_state),
                         mcast_mask=a_mcast_mask,
                     )
                     cute.copy(
                         tma_atom_b1,
                         tBgB1_k,
                         tBsB1_pipe,
-                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(
-                            mainloop_producer_state
-                        ),
+                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(mainloop_producer_state),
                         mcast_mask=b_mcast_mask,
                     )
                     cute.copy(
                         tma_atom_b2,
                         tBgB2_k,
                         tBsB2_pipe,
-                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(
-                            mainloop_producer_state
-                        ),
+                        tma_bar_ptr=mainloop_pipeline.producer_get_barrier(mainloop_producer_state),
                         mcast_mask=b_mcast_mask,
                     )
                     mainloop_pipeline.producer_commit(mainloop_producer_state)
@@ -1924,9 +1788,7 @@ class FC1GatedActSM120BF16BackwardDxKernel:
         mbar_helpers_bytes = 1024
 
         ab_stage = (
-            (smem_capacity - occupancy * 1024) // occupancy
-            - mbar_helpers_bytes
-            - epi_bytes
+            (smem_capacity - occupancy * 1024) // occupancy - mbar_helpers_bytes - epi_bytes
         ) // ab_bytes_per_stage
         return ab_stage, epi_stage
 
@@ -1973,9 +1835,7 @@ class FC1GatedActSM120BF16BackwardDxKernel:
         gc = cute.zipped_divide(c, tiler=c_shape)
         num_ctas_mnl = gc[(0, (None, None, None))].shape
         cluster_shape_mnl = (1, 1, 1)
-        tile_sched_params = utils.PersistentTileSchedulerParams(
-            num_ctas_mnl, cluster_shape_mnl
-        )
+        tile_sched_params = utils.PersistentTileSchedulerParams(num_ctas_mnl, cluster_shape_mnl)
         grid = utils.StaticPersistentTileScheduler.get_grid_shape(
             tile_sched_params, max_active_clusters
         )

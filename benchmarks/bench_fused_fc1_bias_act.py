@@ -70,16 +70,26 @@ def error_metrics(actual: torch.Tensor, expected: torch.Tensor) -> ErrorMetrics:
 def _make_cute_3d(t: torch.Tensor, cute_dtype=None) -> tuple:
     if cute_dtype is None:
         import cutlass
+
         cute_dtype = cutlass.Float16
     import cutlass.torch as ct
+
     cute_t, _ = ct.cute_tensor_like(
-        t.unsqueeze(-1).cpu(), cute_dtype, False, 16,
+        t.unsqueeze(-1).cpu(),
+        cute_dtype,
+        False,
+        16,
     )
     return cute_t
 
 
 def _build_cute_kernel(
-    M: int, H: int, N: int, act_id: int, dtype: object,
+    M: int,
+    H: int,
+    N: int,
+    act_id: int,
+    dtype: object,
+    atom_layout_mnk: tuple[int, int, int] | None = None,
 ) -> tuple:
     """Compile the CuTe DSL kernel once. Returns (compiled, make_args_fn)."""
     import cuda.bindings.driver  # noqa: F401
@@ -99,18 +109,28 @@ def _build_cute_kernel(
         FusedGatedMlpShape(batch_tokens=M, hidden_size=H, intermediate_size=N),
         ab_dtype=dtype,
         output_dtype=dtype,
+        **({} if atom_layout_mnk is None else {"atom_layout_mnk": atom_layout_mnk}),
     )
     hw = cutlass.utils.HardwareInfo()
     max_clusters = hw.get_max_active_clusters(1)
     stream = ct.default_stream()
 
     compiled = cute.compile(
-        kernel, x_cute, w_gate_cute, w_value_cute, y_cute,
-        act_id, max_clusters, stream,
+        kernel,
+        x_cute,
+        w_gate_cute,
+        w_value_cute,
+        y_cute,
+        act_id,
+        max_clusters,
+        stream,
     )
 
     def make_args(
-        x: torch.Tensor, wg: torch.Tensor, wv: torch.Tensor, y: torch.Tensor,
+        x: torch.Tensor,
+        wg: torch.Tensor,
+        wv: torch.Tensor,
+        y: torch.Tensor,
     ):
         import cutlass
         import cutlass.torch as ct
@@ -131,11 +151,15 @@ def _build_cute_kernel(
 @torch.no_grad()
 def run_case(
     *,
-    B: int, S: int, H: int, I: int,
+    B: int,
+    S: int,
+    H: int,
+    I: int,
     activation: str,
     dtype: torch.dtype,
     cute_dtype: object,
-    warmup: int, iters: int,
+    warmup: int,
+    iters: int,
     run_cute: bool,
     cute_compiled: object | None = None,
     cute_args_fn: object | None = None,
@@ -144,7 +168,7 @@ def run_case(
     act_name = activation
 
     # Scale inputs to keep values within FP16/BF16 range during K-dim accumulation.
-    scale = 1.0 / (H ** 0.5)
+    scale = 1.0 / (H**0.5)
     x = torch.randn(M, H, device="cuda", dtype=dtype) * scale
     weight = torch.randn(2 * I, H, device="cuda", dtype=dtype) * scale
 
@@ -169,8 +193,9 @@ def run_case(
         w_gate, w_value = split_gated_weight(w_inter)
 
         def run_cute_fn():
-            x_c, wg_c, wv_c, y_c, y3d, stream = cute_args_fn(x, w_gate, w_value,
-                torch.empty(M, I, device="cuda", dtype=dtype))
+            x_c, wg_c, wv_c, y_c, y3d, stream = cute_args_fn(
+                x, w_gate, w_value, torch.empty(M, I, device="cuda", dtype=dtype)
+            )
             cute_compiled(x_c, wg_c, wv_c, y_c, stream)
             return y3d.squeeze(-1)
 
@@ -190,14 +215,13 @@ def run_case(
                 run_cute_fn, warmup=warmup, iters=iters
             )
 
-    ref_median, ref_mean, ref_p90 = cuda_event_benchmark(
-        run_cublaslt, warmup=warmup, iters=iters
-    )
+    ref_median, ref_mean, ref_p90 = cuda_event_benchmark(run_cublaslt, warmup=warmup, iters=iters)
 
     result: BenchmarkResult = {
         "dtype": str(dtype).replace("torch.", ""),
         "shape": (B, S, H),
-        "I": I, "M": M,
+        "I": I,
+        "M": M,
         "activation": activation,
         "cublaslt_ms": ref_median,
         "cublaslt_mean": ref_mean,
@@ -210,10 +234,14 @@ def run_case(
 
 
 def _build_cute_backward_dx_kernel(
-    M: int, H: int, I: int, dtype: object,
+    M: int,
+    H: int,
+    I: int,
+    dtype: object,
+    atom_layout_mnk: tuple[int, int, int] | None = None,
 ) -> tuple:
     """Compile the backward dx CuTe DSL kernel once. Returns (compiled, make_args_fn).
-    
+
     Weights are passed transposed ([H, I] instead of [I, H]) so the K dimension
     aligns with the A operands (dgate/dvalue have K=I).
     """
@@ -234,6 +262,7 @@ def _build_cute_backward_dx_kernel(
     kernel = FC1GatedActSM120BF16BackwardDxKernel(
         ab_dtype=dtype,
         output_dtype=dtype,
+        **({} if atom_layout_mnk is None else {"atom_layout_mnk": atom_layout_mnk}),
     )
     hw = cutlass.utils.HardwareInfo()
     max_clusters = hw.get_max_active_clusters(1)
@@ -241,13 +270,20 @@ def _build_cute_backward_dx_kernel(
 
     compiled = cute.compile(
         kernel,
-        dgate_cute, dvalue_cute, w_gate_T_cute, w_value_T_cute, dx_cute,
-        max_clusters, stream,
+        dgate_cute,
+        dvalue_cute,
+        w_gate_T_cute,
+        w_value_T_cute,
+        dx_cute,
+        max_clusters,
+        stream,
     )
 
     def make_args(
-        dg: torch.Tensor, dv: torch.Tensor,
-        wg_T: torch.Tensor, wv_T: torch.Tensor,
+        dg: torch.Tensor,
+        dv: torch.Tensor,
+        wg_T: torch.Tensor,
+        wv_T: torch.Tensor,
         dx: torch.Tensor,
     ):
         import cutlass.torch as ct
@@ -269,17 +305,21 @@ def _build_cute_backward_dx_kernel(
 @torch.no_grad()
 def run_backward_dx_case(
     *,
-    B: int, S: int, H: int, I: int,
+    B: int,
+    S: int,
+    H: int,
+    I: int,
     dtype: torch.dtype,
     cute_dtype: object,
-    warmup: int, iters: int,
+    warmup: int,
+    iters: int,
     run_cute: bool,
     cute_compiled: object | None = None,
     cute_args_fn: object | None = None,
 ) -> BenchmarkResult:
     M = B * S
 
-    scale = 1.0 / (H ** 0.5)
+    scale = 1.0 / (H**0.5)
     dgate = torch.randn(M, I, device="cuda", dtype=dtype) * scale
     dvalue = torch.randn(M, I, device="cuda", dtype=dtype) * scale
     weight = torch.randn(2 * I, H, device="cuda", dtype=dtype) * scale
@@ -289,8 +329,7 @@ def run_backward_dx_case(
 
     # ── baseline: two torch.mm + add ───────────────────────────────────
     def run_baseline() -> torch.Tensor:
-        return torch.mm(dgate.float(), w_gate.float()) + \
-               torch.mm(dvalue.float(), w_value.float())
+        return torch.mm(dgate.float(), w_gate.float()) + torch.mm(dvalue.float(), w_value.float())
 
     ref = run_baseline().to(dtype)
 
@@ -305,8 +344,8 @@ def run_backward_dx_case(
 
         def run_cute_fn():
             dg_c, dv_c, wg_c, wv_c, dx_c, dx3d, stream = cute_args_fn(
-                dgate, dvalue, w_gate_T, w_value_T,
-                torch.empty(M, H, device="cuda", dtype=dtype))
+                dgate, dvalue, w_gate_T, w_value_T, torch.empty(M, H, device="cuda", dtype=dtype)
+            )
             cute_compiled(dg_c, dv_c, wg_c, wv_c, dx_c, stream)
             return dx3d.squeeze(-1)
 
@@ -326,14 +365,13 @@ def run_backward_dx_case(
                 run_cute_fn, warmup=warmup, iters=iters
             )
 
-    ref_median, ref_mean, ref_p90 = cuda_event_benchmark(
-        run_baseline, warmup=warmup, iters=iters
-    )
+    ref_median, ref_mean, ref_p90 = cuda_event_benchmark(run_baseline, warmup=warmup, iters=iters)
 
     result: BenchmarkResult = {
         "dtype": str(dtype).replace("torch.", ""),
         "shape": (B, S, H),
-        "I": I, "M": M,
+        "I": I,
+        "M": M,
         "pass_name": "backward_dx",
         "baseline_ms": ref_median,
         "baseline_mean": ref_mean,
@@ -382,14 +420,10 @@ def _format_result_section(
         else:
             if act:
                 lines.append(
-                    f"{shape_str:<22} {dt:<6} {act:<5} "
-                    f"{bl_ms:>10.3f} {'N/A':>10} {'-':>9}"
+                    f"{shape_str:<22} {dt:<6} {act:<5} {bl_ms:>10.3f} {'N/A':>10} {'-':>9}"
                 )
             else:
-                lines.append(
-                    f"{shape_str:<22} {dt:<6} "
-                    f"{bl_ms:>10.3f} {'N/A':>10} {'-':>9}"
-                )
+                lines.append(f"{shape_str:<22} {dt:<6} {bl_ms:>10.3f} {'N/A':>10} {'-':>9}")
 
     speedups = [float(r["cute_speedup"]) for r in results if r.get("cute_speedup", 0) > 0]
     if speedups:
@@ -400,10 +434,13 @@ def _format_result_section(
 
     err_items = [r for r in results if r.get("max_abs_err") is not None and r["max_abs_err"] > 0]
     if err_items:
-        lines.extend([
-            "", f"  Error ({title})",
-            f"  {'shape':<22} {'max_abs':>10} {'rmse':>10} {'max_rel':>10}",
-        ])
+        lines.extend(
+            [
+                "",
+                f"  Error ({title})",
+                f"  {'shape':<22} {'max_abs':>10} {'rmse':>10} {'max_rel':>10}",
+            ]
+        )
         for r in err_items:
             shape_str = f"({r['shape'][0]},{r['shape'][1]},{r['shape'][2]},{r['I']})"
             lines.append(
@@ -436,7 +473,9 @@ def format_report(
     _format_result_section(lines, fwd_results, "Forward: FC1 + Gated-Act", "cuBLASLt")
 
     if bw_results:
-        _format_result_section(lines, bw_results, "Backward dx: dgate@w_gate + dvalue@w_value", "torch.mm")
+        _format_result_section(
+            lines, bw_results, "Backward dx: dgate@w_gate + dvalue@w_value", "torch.mm"
+        )
 
     return "\n".join(lines)
 
@@ -447,16 +486,33 @@ def main() -> None:
     )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=50)
-    parser.add_argument("--no-cute", action="store_true",
-                        help="Skip CuTe DSL, report cuBLASLt only")
-    parser.add_argument("--dtypes", nargs="+", default=["fp16"],
-                        choices=["fp16", "bf16"],
-                        help="Data types to benchmark (default: fp16)")
-    parser.add_argument("--no-backward", action="store_true",
-                        help="Skip backward dx kernel benchmark")
-    parser.add_argument("--out", type=Path,
-                        default=Path("fc1_bias_act_cute_bench.txt"))
+    parser.add_argument(
+        "--no-cute", action="store_true", help="Skip CuTe DSL, report cuBLASLt only"
+    )
+    parser.add_argument(
+        "--dtypes",
+        nargs="+",
+        default=["fp16"],
+        choices=["fp16", "bf16"],
+        help="Data types to benchmark (default: fp16)",
+    )
+    parser.add_argument(
+        "--no-backward", action="store_true", help="Skip backward dx kernel benchmark"
+    )
+    parser.add_argument(
+        "--atom-layout",
+        default=None,
+        help="MMA atom layout as M,N,K (default: kernel default; "
+        "e.g. 4,2,1 for 288 threads, 2,2,1 for 160 threads)",
+    )
+    parser.add_argument("--out", type=Path, default=Path("fc1_bias_act_cute_bench.txt"))
     args = parser.parse_args()
+    atom_layout: tuple[int, int, int] | None = None
+    if args.atom_layout is not None:
+        parts = [int(x) for x in args.atom_layout.split(",")]
+        if len(parts) != 3:
+            parser.error("--atom-layout expects 3 comma-separated ints, e.g. 4,2,1")
+        atom_layout = (parts[0], parts[1], parts[2])
     run_cute = not args.no_cute
     run_backward_dx = run_cute and not args.no_backward
 
@@ -491,8 +547,17 @@ def main() -> None:
                         continue
                     seen.add(key)
                     act_id = 0 if act == "silu" else 1
-                    print(f"Compiling CuTe DSL kernel: {dt_name}, M={key[1]}, H={key[2]}, I={key[3]}, {act} ...")
-                    cute_kernels[key] = _build_cute_kernel(key[1], key[2], key[3], act_id, cute_dt)
+                    print(
+                        f"Compiling CuTe DSL kernel: {dt_name}, M={key[1]}, H={key[2]}, I={key[3]}, {act} ..."
+                    )
+                    cute_kernels[key] = _build_cute_kernel(
+                        key[1],
+                        key[2],
+                        key[3],
+                        act_id,
+                        cute_dt,
+                        atom_layout_mnk=atom_layout,
+                    )
 
     results: list[BenchmarkResult] = []
     for dt_name in args.dtypes:
@@ -505,11 +570,15 @@ def main() -> None:
                 print(f"[{dt_name}] B={B},S={S},H={H},I={I} act={act} ...")
                 results.append(
                     run_case(
-                        B=B, S=S, H=H, I=I,
+                        B=B,
+                        S=S,
+                        H=H,
+                        I=I,
                         activation=act,
                         dtype=torch_dt,
                         cute_dtype=cute_dt,
-                        warmup=args.warmup, iters=args.iters,
+                        warmup=args.warmup,
+                        iters=args.iters,
                         run_cute=run_cute,
                         cute_compiled=comp,
                         cute_args_fn=args_fn,
@@ -528,8 +597,16 @@ def main() -> None:
                 if key in bw_seen:
                     continue
                 bw_seen.add(key)
-                print(f"Compiling backward dx CuTe kernel: {dt_name}, M={key[1]}, H={key[2]}, I={key[3]} ...")
-                bw_kernels[key] = _build_cute_backward_dx_kernel(key[1], key[2], key[3], cute_dt)
+                print(
+                    f"Compiling backward dx CuTe kernel: {dt_name}, M={key[1]}, H={key[2]}, I={key[3]} ..."
+                )
+                bw_kernels[key] = _build_cute_backward_dx_kernel(
+                    key[1],
+                    key[2],
+                    key[3],
+                    cute_dt,
+                    atom_layout_mnk=atom_layout,
+                )
 
     bw_results: list[BenchmarkResult] = []
     if run_backward_dx:
@@ -542,10 +619,14 @@ def main() -> None:
                 print(f"[{dt_name}] backward_dx B={B},S={S},H={H},I={I} ...")
                 bw_results.append(
                     run_backward_dx_case(
-                        B=B, S=S, H=H, I=I,
+                        B=B,
+                        S=S,
+                        H=H,
+                        I=I,
                         dtype=torch_dt,
                         cute_dtype=cute_dt,
-                        warmup=args.warmup, iters=args.iters,
+                        warmup=args.warmup,
+                        iters=args.iters,
                         run_cute=run_backward_dx,
                         cute_compiled=comp,
                         cute_args_fn=args_fn,
