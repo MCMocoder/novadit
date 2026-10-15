@@ -24,7 +24,7 @@ SM120_BF16_MMA_INST_MNK = (16, 8, 16)
 #   (4, 2, 1) -> 8 MMA warps + 1 TMA warp = 288 threads  (default)
 #   (2, 2, 1) -> 4 MMA warps + 1 TMA warp = 160 threads  (legacy, A/B baseline)
 SM120_DEFAULT_ATOM_LAYOUT_MNK = (4, 2, 1)
-SM120_SUPPORTED_ATOM_LAYOUTS_MNK = ((4, 2, 1), (2, 2, 1))
+SM120_SUPPORTED_ATOM_LAYOUTS_MNK = ((4, 4, 1), (4, 2, 1), (2, 2, 1))
 SM120_DEFAULT_TILE_SHAPE_MNK = (64, 64, 64)
 SM120_SUPPORTED_TILE_SHAPES_MNK = (
     (64, 64, 64),
@@ -566,6 +566,23 @@ class FC1GatedActSM120BF16Kernel:
             tCsB_value_copy_view = thr_copy_ldmatrix_B.partition_S(sB_value)
             tCrB_value_copy_view = thr_copy_ldmatrix_B.retile(tCrB_value)
 
+            # The TMA store pipeline spans ALL persistent work tiles.
+            # producer_acquire/commit carry no per-call state and lower to
+            # cp.async.bulk.wait_group/commit_group, while the smem stage index
+            # is chosen by us -- so keeping the pipeline alive across tiles
+            # (instead of draining it at every tile boundary) lets the previous
+            # tile's stores stay in flight while this tile's mainloop runs.
+            tma_store_pipeline = pipeline.PipelineTmaStore.create(
+                num_stages=self.epi_stage,
+                producer_group=pipeline.CooperativeGroup(
+                    pipeline.Agent.Thread,
+                    self.num_mma_warps * self.num_threads_per_warp,
+                ),
+            )
+            # Rolling epilogue buffer slot: keeps advancing across tiles so a
+            # buffer is not reused until its store has drained (epi_stage deep).
+            epi_buffer_slot = cutlass.Int32(0)
+
             while work_tile.is_valid_tile:
                 tile_coord_mnl = work_tile.tile_idx
                 gC_mnl_slice = gC_mnl[(None, None, *tile_coord_mnl)]
@@ -737,22 +754,31 @@ class FC1GatedActSM120BF16Kernel:
                 epi_tile_shape = tcgc_for_tma_partition.shape[1]
                 epi_tile_layout = cute.make_layout(epi_tile_shape, stride=(1, epi_tile_shape[0]))
 
-                tma_store_producer_group = pipeline.CooperativeGroup(
-                    pipeline.Agent.Thread,
-                    self.num_mma_warps * self.num_threads_per_warp,
-                )
-                tma_store_pipeline = pipeline.PipelineTmaStore.create(
-                    num_stages=self.epi_stage,
-                    producer_group=tma_store_producer_group,
-                )
-
                 for epi_idx in cutlass.range_constexpr(epi_tile_num):
                     # Gated activation on fp32 accumulators before the r2s copy.
                     for epi_v in cutlass.range_constexpr(size_tRS_rD):
                         acc_v = tRS_rAcc_value[epi_idx * size_tRS_rD + epi_v]
                         acc_g = tRS_rAcc_gate[epi_idx * size_tRS_rD + epi_v]
+                        # act_id is restricted to ACT_SILU / ACT_GELU at the API
+                        # boundary; this initial binding keeps the traced branch
+                        # total without a Python-level early exit, which the DSL
+                        # rejects inside a kernel body.
+                        act_val = cutlass.Float32(0.0)
                         if cutlass.const_expr(self.act_id == ACT_SILU):
-                            act_val = acc_g / (cutlass.Float32(1.0) + cute.exp(-acc_g))
+                            # silu(x) = x * sigmoid(x) = 0.5 * x * (1 + tanh(x/2))
+                            # Exact identity, but it replaces the exp + IEEE fp32
+                            # division sequence (MUFU.EX2 + MUFU.RCP + Newton
+                            # refinement + rounding fixups, ~8-10 instructions)
+                            # with one MUFU.TANH plus two FMUL/FMA.  This kernel
+                            # issues ~8 instructions per HMMA and MUFU throughput
+                            # is a quarter of the FMA rate, so the epilogue's
+                            # per-element instruction count is what competes with
+                            # the MMA stream.
+                            act_val = (
+                                cutlass.Float32(0.5)
+                                * acc_g
+                                * (cutlass.Float32(1.0) + cute.tanh(cutlass.Float32(0.5) * acc_g))
+                            )
                         elif cutlass.const_expr(self.act_id == ACT_GELU):
                             t3 = acc_g * acc_g * acc_g
                             inner = cutlass.Float32(0.7978845608028654) * (
@@ -769,7 +795,8 @@ class FC1GatedActSM120BF16Kernel:
                     acc_vec = tRS_rD.load()
                     tRS_rD_out.store(acc_vec.to(self.c_dtype))
 
-                    epi_buffer = epi_idx % cute.size(tRS_sD, mode=[3])
+                    epi_buffer = epi_buffer_slot % cute.size(tRS_sD, mode=[3])
+                    epi_buffer_slot = epi_buffer_slot + 1
                     cute.copy(
                         tiled_copy_r2s,
                         tRS_rD_out,
@@ -791,8 +818,9 @@ class FC1GatedActSM120BF16Kernel:
 
                 tile_sched.advance_to_next_work()
                 work_tile = tile_sched.get_current_work()
-                tma_store_pipeline.producer_tail()
             # End of while loop
+            # Drain all outstanding TMA stores once, after the last tile.
+            tma_store_pipeline.producer_tail()
         # End of MMA warp group
         # Start of DMA warp group
         elif warp_idx == self.num_mma_warps:
@@ -1477,6 +1505,18 @@ class FC1GatedActSM120BF16BackwardDxKernel:
             tCsB2_copy_view = thr_copy_ldmatrix_B.partition_S(sB_w_value)
             tCrB2_copy_view = thr_copy_ldmatrix_B.retile(tCrB2)
 
+            # Spanning store pipeline + rolling buffer slot, see the forward
+            # kernel: this lets the previous tile's TMA stores stay in flight
+            # while the next tile's mainloop runs.
+            tma_store_pipeline = pipeline.PipelineTmaStore.create(
+                num_stages=self.epi_stage,
+                producer_group=pipeline.CooperativeGroup(
+                    pipeline.Agent.Thread,
+                    self.num_mma_warps * self.num_threads_per_warp,
+                ),
+            )
+            epi_buffer_slot = cutlass.Int32(0)
+
             while work_tile.is_valid_tile:
                 tile_coord_mnl = work_tile.tile_idx
                 gC_mnl_slice = gC_mnl[(None, None, *tile_coord_mnl)]
@@ -1658,15 +1698,6 @@ class FC1GatedActSM120BF16BackwardDxKernel:
                 epi_tile_shape = tcgc_for_tma_partition.shape[1]
                 epi_tile_layout = cute.make_layout(epi_tile_shape, stride=(1, epi_tile_shape[0]))
 
-                tma_store_producer_group = pipeline.CooperativeGroup(
-                    pipeline.Agent.Thread,
-                    self.num_mma_warps * self.num_threads_per_warp,
-                )
-                tma_store_pipeline = pipeline.PipelineTmaStore.create(
-                    num_stages=self.epi_stage,
-                    producer_group=tma_store_producer_group,
-                )
-
                 for epi_idx in cutlass.range_constexpr(epi_tile_num):
                     for epi_v in cutlass.range_constexpr(size_tRS_rD):
                         tRS_rD[epi_v] = tRS_rAcc[epi_idx * size_tRS_rD + epi_v]
@@ -1675,7 +1706,8 @@ class FC1GatedActSM120BF16BackwardDxKernel:
                     acc_vec = tRS_rD.load()
                     tRS_rD_out.store(acc_vec.to(self.c_dtype))
 
-                    epi_buffer = epi_idx % cute.size(tRS_sD, mode=[3])
+                    epi_buffer = epi_buffer_slot % cute.size(tRS_sD, mode=[3])
+                    epi_buffer_slot = epi_buffer_slot + 1
                     cute.copy(
                         tiled_copy_r2s,
                         tRS_rD_out,
@@ -1697,7 +1729,9 @@ class FC1GatedActSM120BF16BackwardDxKernel:
 
                 tile_sched.advance_to_next_work()
                 work_tile = tile_sched.get_current_work()
-                tma_store_pipeline.producer_tail()
+
+            # Drain all outstanding TMA stores once, after the last tile.
+            tma_store_pipeline.producer_tail()
 
         elif warp_idx == self.num_mma_warps:
             cute.arch.setmaxregister_decrease(self.load_register_requirement)

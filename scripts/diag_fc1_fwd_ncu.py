@@ -35,7 +35,12 @@ import torch
 
 
 def build_and_run(
-    M: int, H: int, I: int, act: str, dtype: torch.dtype, max_clusters: int,
+    M: int,
+    H: int,
+    I: int,
+    act: str,
+    dtype: torch.dtype,
+    max_clusters: int,
 ) -> None:
     """Compile the forward kernel once and launch it ONCE for profiling."""
     import cutlass
@@ -44,7 +49,7 @@ def build_and_run(
     from fc1_bias_act import FC1GatedActSM120BF16Kernel, FusedGatedMlpShape
 
     cute_dtype = cutlass.Float16 if dtype == torch.float16 else cutlass.BFloat16
-    scale = 1.0 / (H ** 0.5)
+    scale = 1.0 / (H**0.5)
 
     # ── compile ──────────────────────────────────────────────────────
     def _empty(m, n):
@@ -54,7 +59,8 @@ def build_and_run(
 
     kernel = FC1GatedActSM120BF16Kernel(
         FusedGatedMlpShape(batch_tokens=M, hidden_size=H, intermediate_size=I),
-        ab_dtype=cute_dtype, output_dtype=cute_dtype,
+        ab_dtype=cute_dtype,
+        output_dtype=cute_dtype,
     )
     hw = cutlass.utils.HardwareInfo()
     stream = ct.default_stream()
@@ -62,8 +68,13 @@ def build_and_run(
 
     compiled = cute.compile(
         kernel,
-        _empty(M, H), _empty(I, H), _empty(I, H), _empty(M, I),
-        act_id, max_clusters, stream,
+        _empty(M, H),
+        _empty(I, H),
+        _empty(I, H),
+        _empty(M, I),
+        act_id,
+        max_clusters,
+        stream,
     )
 
     # ── tensors ──────────────────────────────────────────────────────
@@ -83,7 +94,9 @@ def build_and_run(
 
     tiles_fwd = (M // 64) * (I // 64)
     print(f"\n  Shape:  B·S=M={M}  H={H}  I={I}")
-    print(f"  Tiles:  {tiles_fwd} work tiles  |  K-tile cnt = {H // 64}  |  max_clusters = {max_clusters}")
+    print(
+        f"  Tiles:  {tiles_fwd} work tiles  |  K-tile cnt = {H // 64}  |  max_clusters = {max_clusters}"
+    )
     print(f"  SM:     {torch.cuda.get_device_capability(0)}")
     print(f"  GPU:    {torch.cuda.get_device_name(0)}")
     print(f"  dtype:  {dtype}  act: {act}")
@@ -107,17 +120,24 @@ def main():
         description="Single-launch CuTe DSL forward kernel for Nsight Compute GUI"
     )
     parser.add_argument(
-        "--shape", default="2,128,768,768",
+        "--shape",
+        default="2,128,768,768",
         help="B,S,H,I (default: 2,128,768,768)",
     )
     parser.add_argument("--dtype", choices=["fp16", "bf16"], default="fp16")
     parser.add_argument("--act", choices=["silu", "gelu"], default="silu")
-    parser.add_argument("--clusters", type=int, default=16,
-                        help="max_active_clusters (default: 16; try 1 vs 32 vs sm_count)")
-    parser.add_argument("--no-pause", action="store_true",
-                        help="Skip pause (for ncu CLI collection)")
-    parser.add_argument("--pause-sec", type=int, default=0,
-                        help="Extra pause before launch (seconds)")
+    parser.add_argument(
+        "--clusters",
+        type=int,
+        default=16,
+        help="max_active_clusters (default: 16; try 1 vs 32 vs sm_count)",
+    )
+    parser.add_argument(
+        "--no-pause", action="store_true", help="Skip pause (for ncu CLI collection)"
+    )
+    parser.add_argument(
+        "--pause-sec", type=int, default=0, help="Extra pause before launch (seconds)"
+    )
     args = parser.parse_args()
 
     parts = args.shape.split(",")
